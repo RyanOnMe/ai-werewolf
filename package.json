@@ -1,0 +1,30 @@
+{
+  "name": "ai-werewolf",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AI 狼人杀：确定性法官 + pi agent loop 驱动的玩家 agent",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --test-concurrency=1 test/*.test.ts",
+    "verify": "bash scripts/verify.sh",
+    "play": "node src/cli/play.ts",
+    "serve": "node src/cli/serve.ts",
+    "replay": "node src/cli/replay.ts",
+    "doctor": "node src/cli/doctor.ts",
+    "smoke:llm": "node src/cli/smoke.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.84.1",
+    "@earendil-works/pi-ai": "0.84.1",
+    "@earendil-works/pi-coding-agent": "0.84.1",
+    "typebox": "1.3.7"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="zh-CN">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>AI 狼人杀 · 观战</title>
+		<link
+			rel="icon"
+			href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%230b1020'/%3E%3Ctext x='32' y='44' font-size='36' text-anchor='middle' fill='%23d9b45b'%3E%E7%8B%BC%3C/text%3E%3C/svg%3E"
+		/>
+		<link rel="stylesheet" href="/styles.css" />
+	</head>
+	<body>
+		<div class="ambient" aria-hidden="true"></div>
+		<div class="app">
+			<header class="topbar">
+				<div class="brand">
+					<div class="brand-mark">狼</div>
+					<div class="brand-text">
+						<h1>AI 狼人杀</h1>
+						<p>观战模式 · 确定性法官 + pi agent 玩家</p>
+					</div>
+				</div>
+				<div class="topbar-actions">
+					<label class="field inline">
+						<span>对局</span>
+						<select id="game-select" aria-label="选择对局">
+							<option value="">加载中…</option>
+						</select>
+					</label>
+					<div class="segmented" id="view-toggle" hidden>
+						<button type="button" data-view="public" class="active">公开视角</button>
+						<button type="button" data-view="god">上帝视角</button>
+					</div>
+					<button type="button" id="refresh-btn" class="btn ghost">刷新</button>
+					<button type="button" id="new-game-btn" class="btn primary">新对局</button>
+				</div>
+			</header>
+
+			<section class="new-game-panel" id="new-game-panel" hidden>
+				<form id="new-game-form" class="new-game-form">
+					<div class="new-game-title">
+						<h2>开始一局</h2>
+						<p>脚本对局不需要模型；真实模型会复用 pi 的登录状态。</p>
+					</div>
+					<label class="field">
+						<span>模式</span>
+						<select id="mode-select">
+							<option value="scripted">脚本对局（快速）</option>
+							<option value="live">真实模型</option>
+						</select>
+					</label>
+					<label class="field">
+						<span>种子</span>
+						<input id="seed-input" type="text" maxlength="80" autocomplete="off" />
+					</label>
+					<label class="field" id="model-field">
+						<span>模型</span>
+						<select id="model-select"></select>
+					</label>
+					<button type="submit" id="start-game-btn" class="btn primary">开始对局</button>
+					<p class="form-hint" id="new-game-hint"></p>
+				</form>
+			</section>
+
+			<div class="error-banner" id="error-banner" hidden>
+				<span id="error-text"></span>
+				<button type="button" id="error-close" aria-label="关闭">×</button>
+			</div>
+
+			<main class="layout">
+				<section class="card table-card">
+					<div class="card-head">
+						<div>
+							<div class="eyebrow" id="game-id">未选择对局</div>
+							<h2 id="phase-title">等待对局</h2>
+						</div>
+						<div class="status-pill" id="status-pill" data-state="idle">未连接</div>
+					</div>
+
+					<div class="table-wrap" id="table-wrap">
+						<div class="table-rim" aria-hidden="true"></div>
+						<div class="seats-ring" id="seats-ring"></div>
+						<div class="table-center" id="table-center">
+							<div class="center-day" id="day-label">—</div>
+							<div class="center-phase" id="phase-label">等待对局</div>
+							<div class="center-counts">
+								<span>存活 <b id="alive-count">—</b></span>
+								<span>出局 <b id="dead-count">—</b></span>
+							</div>
+							<div class="center-winner" id="winner-label" hidden></div>
+						</div>
+					</div>
+
+					<div class="god-panel" id="god-panel" hidden>
+						<div class="god-head">
+							<h3>上帝视角</h3>
+							<span class="god-tag">仅本地</span>
+						</div>
+						<div id="god-content"></div>
+					</div>
+				</section>
+
+				<section class="card timeline-card">
+					<div class="card-head timeline-head">
+						<div>
+							<div class="eyebrow">事件流</div>
+							<h2>时间线</h2>
+						</div>
+						<div class="timeline-actions">
+							<button type="button" id="replay-btn" class="btn tiny ghost" hidden>自动回放</button>
+							<button type="button" id="latest-btn" class="btn tiny ghost" hidden>回到最新</button>
+						</div>
+					</div>
+					<div class="timeline" id="timeline"></div>
+					<div class="scrubber">
+						<input type="range" id="scrubber" min="0" max="0" value="0" aria-label="时间线" />
+						<div class="scrubber-meta">
+							<span id="scrubber-label">事件 0 / 0</span>
+							<span id="follow-label">跟随最新</span>
+						</div>
+					</div>
+				</section>
+			</main>
+
+			<footer class="footer">
+				<span>公开视角只包含 public 事件；上帝视角需要服务端以 --god 启动。</span>
+				<span id="connection-note">选择对局开始观战</span>
+			</footer>
+		</div>
+		<script src="/app.js" defer></script>
+	</body>
+</html>
