@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node
 import { extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AddressInfo } from "node:net";
-import type { GameEvent, Role, Winner } from "../engine/types.ts";
+import type { GameEvent, GameMode as BoardMode, Role, Winner } from "../engine/types.ts";
 import type { GameEngine } from "../engine/engine.ts";
 import { runGame } from "../judge/runner.ts";
 import { RandomPolicy } from "../agents/scripted.ts";
@@ -35,7 +35,7 @@ const SSE_HEADERS: Record<string, string> = {
 /** 没有 summary 且长时间没有新事件，视为已中断的旧对局。 */
 const STALE_RUN_MS = 15 * 60 * 1000;
 
-type GameMode = "scripted" | "live";
+type RunMode = "scripted" | "live";
 type ViewMode = "public" | "god";
 type GameState = "running" | "finished" | "error";
 
@@ -50,6 +50,8 @@ export interface SpectatorServerOptions {
 	godEnabled?: boolean;
 	/** 前端“真实模型”表单的默认模型 */
 	model?: string;
+	/** 新对局默认板子，默认 9p */
+	board?: BoardMode;
 	thinkingLevel?: string;
 	maxDays?: number;
 	timeoutMs?: number;
@@ -62,6 +64,8 @@ export interface SpectatorServerOptions {
 export interface GameListItem {
 	gameId: string;
 	seed: string | null;
+	playerCount: number | null;
+	board: BoardMode | null;
 	winner: Winner | null;
 	days: number | null;
 	eventCount: number;
@@ -74,6 +78,8 @@ export interface GameListItem {
 interface RunSummary {
 	gameId?: string;
 	seed?: string;
+	mode?: BoardMode;
+	playerCount?: number;
 	winner?: Winner | null;
 	endReason?: string | null;
 	days?: number;
@@ -120,7 +126,7 @@ function messageOf(error: unknown): string {
  * - 静态托管 web/
  * - GET  /api/config
  * - GET  /api/games
- * - POST /api/games                  { mode, seed, model, thinkingLevel, maxDays }
+ * - POST /api/games                  { mode:"scripted"|"live", board:"9p"|"12p", seed, model, thinkingLevel, maxDays }
  * - GET  /api/games/:id/events?view=public|god   SSE
  * - GET  /api/health
  *
@@ -134,6 +140,7 @@ export class SpectatorServer {
 	private readonly port: number;
 	private readonly godEnabled: boolean;
 	private readonly defaultModelSpec?: string;
+	private readonly defaultBoard: BoardMode;
 	private readonly thinkingLevel: string;
 	private readonly maxDays: number;
 	private readonly timeoutMs: number;
@@ -142,7 +149,7 @@ export class SpectatorServer {
 	private readonly logger: (message: string) => void;
 	private readonly clients = new Set<ServerResponse>();
 	private readonly statuses = new Map<string, { state: GameState; message?: string }>();
-	private active: { gameId: string; mode: GameMode; startedAt: number } | null = null;
+	private active: { gameId: string; mode: RunMode; startedAt: number } | null = null;
 	private starting = false;
 	private modelsPromise: Promise<string[]> | null = null;
 	private modelCache: LoadedModel | null = null;
@@ -158,6 +165,7 @@ export class SpectatorServer {
 		this.port = options.port ?? 7331;
 		this.godEnabled = options.godEnabled ?? false;
 		this.defaultModelSpec = options.model;
+		this.defaultBoard = options.board === "12p" ? "12p" : "9p";
 		this.thinkingLevel = options.thinkingLevel ?? "low";
 		this.maxDays = options.maxDays ?? 30;
 		this.timeoutMs = options.timeoutMs ?? 240_000;
@@ -244,6 +252,8 @@ export class SpectatorServer {
 				godEnabled: this.godEnabled,
 				models,
 				defaultModel: this.pickDefaultModel(models),
+				boards: ["9p", "12p"],
+				defaultBoard: this.defaultBoard,
 				activeGameId: this.active?.gameId ?? null,
 				starting: this.starting,
 			});
@@ -321,7 +331,12 @@ export class SpectatorServer {
 		if (rawMode !== "scripted" && rawMode !== "live") {
 			throw new HttpError(400, "mode 必须是 scripted 或 live");
 		}
-		const mode: GameMode = rawMode;
+		const mode: RunMode = rawMode;
+		const rawBoard = body.board;
+		if (rawBoard !== undefined && rawBoard !== "9p" && rawBoard !== "12p") {
+			throw new HttpError(400, "board 必须是 9p 或 12p");
+		}
+		const board: BoardMode = rawBoard === "12p" ? "12p" : rawBoard === "9p" ? "9p" : this.defaultBoard;
 		const seed =
 			typeof body.seed === "string" && body.seed.trim().length > 0
 				? body.seed.trim().slice(0, 80)
@@ -353,10 +368,10 @@ export class SpectatorServer {
 				}
 			}
 
-			let gameId = `web-${sanitize(seed)}-${Date.now().toString(36)}`;
+			let gameId = `web-${board}-${sanitize(seed)}-${Date.now().toString(36)}`;
 			let suffix = 1;
 			while (existsSync(join(this.runsDir, gameId))) {
-				gameId = `web-${sanitize(seed)}-${Date.now().toString(36)}-${suffix++}`;
+				gameId = `web-${board}-${sanitize(seed)}-${Date.now().toString(36)}-${suffix++}`;
 			}
 			const outDir = join(this.runsDir, gameId);
 			this.active = { gameId, mode, startedAt: Date.now() };
@@ -369,6 +384,7 @@ export class SpectatorServer {
 				return new PiPlayer({
 					seat,
 					role,
+					mode: engine.state.mode,
 					model: modelInfo.model,
 					baseStreamFn: modelInfo.runtime.streamSimple.bind(modelInfo.runtime),
 					sessionId: `${gameId}-seat-${seat}`,
@@ -384,12 +400,14 @@ export class SpectatorServer {
 			void runGame({
 				seed,
 				gameId,
+				mode: board,
 				outDir,
 				timeoutMs: this.timeoutMs,
 				policyFactory,
 				config: { maxDays },
 				metadata: {
 					mode,
+					board,
 					source: "web",
 					model: loaded ? `${loaded.provider}/${loaded.modelId}` : null,
 					thinkingLevel: loaded?.thinkingLevel ?? null,
@@ -407,7 +425,7 @@ export class SpectatorServer {
 					this.logger(`对局 ${gameId} 出错：${message}`);
 				});
 
-			this.logger(`启动对局 ${gameId}（${mode}${loaded ? ` / ${loaded.provider}/${loaded.modelId}` : ""}）`);
+			this.logger(`启动对局 ${gameId}（${mode} / ${board}${loaded ? ` / ${loaded.provider}/${loaded.modelId}` : ""}）`);
 			// 让前端拿到 gameId 后立刻连 SSE 时，events.ndjson 已经存在。
 			await waitForFile(join(outDir, "events.ndjson"), 1000);
 			return { gameId };
@@ -436,6 +454,8 @@ export class SpectatorServer {
 			items.push({
 				gameId: entry.name,
 				seed: summary?.seed ?? null,
+				playerCount: summary?.playerCount ?? null,
+				board: summary?.mode ?? null,
 				winner: summary?.winner ?? null,
 				days: summary?.days ?? null,
 				eventCount: summary?.eventCount ?? this.countLines(eventsPath),

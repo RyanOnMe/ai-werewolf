@@ -22,6 +22,10 @@ function makeTurn(
 		witch_act: "night_witch",
 		last_words: "last_words",
 		hunter_shoot: "hunter_shot",
+		sheriff_signup: "sheriff_signup",
+		sheriff_speech: "sheriff_speech",
+		sheriff_vote: "sheriff_vote",
+		badge_transfer: "badge_transfer",
 		day_speech: "day_discuss",
 		day_vote: "day_vote",
 	};
@@ -31,6 +35,10 @@ function makeTurn(
 		witch_act: "请调用 witch_act。",
 		last_words: "请调用 last_words。",
 		hunter_shoot: "请调用 hunter_shoot。",
+		sheriff_signup: "请调用 sheriff_run。",
+		sheriff_speech: "请调用 sheriff_say。",
+		sheriff_vote: "请调用 sheriff_vote。",
+		badge_transfer: "请调用 transfer_badge。",
 		day_speech: "请调用 say。",
 		day_vote: "请调用 vote。",
 	};
@@ -47,11 +55,14 @@ function makeTurn(
 }
 
 function makeView(turn: TurnRequest, role: Role): PlayerView {
-	const alive = turn.kind !== "last_words" && turn.kind !== "hunter_shoot";
+	const alive =
+		turn.kind !== "last_words" && turn.kind !== "hunter_shoot" && turn.kind !== "badge_transfer";
 	return {
 		seat: 1,
 		role,
 		alive,
+		mode: "9p",
+		playerCount: 9,
 		day: 1,
 		phase: turn.phase,
 		players: Array.from({ length: 9 }, (_, index) => ({
@@ -59,9 +70,14 @@ function makeView(turn: TurnRequest, role: Role): PlayerView {
 			alive: index !== 0 || alive,
 			deathDay: null,
 			deathPhase: null,
+			revealed: false,
+			canVote: index !== 0 || alive,
 		})),
 		aliveSeats: alive ? [1, 2, 3, 4, 5, 6, 7, 8, 9] : [2, 3, 4, 5, 6, 7, 8, 9],
 		deadSeats: alive ? [] : [1],
+		sheriff: null,
+		sheriffCandidates: [],
+		sheriffVoteWeight: 1.5,
 		legalTargets: turn.legalTargets,
 		privateInfo: [`你的身份：${role}`, `状态：${alive ? "存活" : "已出局"}`],
 		newEvents: [],
@@ -337,4 +353,59 @@ test("模型错误会标记为 fatal，交由 runner 终止或降级", async () 
 	} finally {
 		await player.dispose();
 	}
+});
+
+test("警长竞选：sheriff_run 提交上警决定", async () => {
+	const result = await runTurn("sheriff_signup", "villager", () => ({
+		name: "sheriff_run",
+		args: { run: true },
+	}));
+	assert.deepEqual(result.action, { kind: "sheriff_signup", seat: 1, run: true });
+	assert.equal(result.toolSets[0]?.includes("sheriff_run"), true);
+});
+
+test("警长竞选：sheriff_say 与 sheriff_vote 走对应工具", async () => {
+	const speech = await runTurn("sheriff_speech", "villager", () => ({
+		name: "sheriff_say",
+		args: { text: "我上警，警徽流先验2号。" },
+	}));
+	assert.deepEqual(speech.action, {
+		kind: "sheriff_speech",
+		seat: 1,
+		text: "我上警，警徽流先验2号。",
+	});
+
+	const vote = await runTurn(
+		"sheriff_vote",
+		"villager",
+		() => ({ name: "sheriff_vote", args: { target: 3 } }),
+		{ legalTargets: [2, 3], sheriffCandidates: [2, 3] },
+	);
+	assert.deepEqual(vote.action, { kind: "sheriff_vote", seat: 1, target: 3 });
+});
+
+test("警徽移交：transfer_badge 支持交人或销毁", async () => {
+	const result = await runTurn(
+		"badge_transfer",
+		"villager",
+		() => ({ name: "transfer_badge", args: { target: 4 } }),
+		{ legalTargets: [4, 5] },
+	);
+	assert.deepEqual(result.action, { kind: "badge_transfer", seat: 1, target: 4 });
+	assert.equal(result.toolSets[0]?.includes("transfer_badge"), true);
+});
+
+test("view_strategy 可读取本局角色策略并继续行动", async () => {
+	const result = await runTurn("day_speech", "werewolf", (_context, index) =>
+		index === 0
+			? { name: "view_strategy", args: {} }
+			: { name: "say", args: { text: "我按狼队计划先站边，晚上再处理关键位。" } },
+	);
+	assert.equal(result.toolSets[0]?.includes("view_strategy"), true);
+	assert.equal(result.toolSets[1]?.includes("say"), true);
+	assert.deepEqual(result.action, {
+		kind: "day_speech",
+		seat: 1,
+		text: "我按狼队计划先站边，晚上再处理关键位。",
+	});
 });

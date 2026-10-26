@@ -69,11 +69,11 @@ async function waitForFinished(base: string, gameId: string): Promise<any> {
 	throw new Error(`game ${gameId} did not finish`);
 }
 
-async function startScriptedGame(base: string, seed: string): Promise<string> {
+async function startScriptedGame(base: string, seed: string, board?: "9p" | "12p"): Promise<string> {
 	const { status, data } = await fetchJson(`${base}/api/games`, {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({ mode: "scripted", seed }),
+		body: JSON.stringify({ mode: "scripted", seed, ...(board ? { board } : {}) }),
 	});
 	assert.equal(status, 200);
 	assert.equal(typeof data.gameId, "string");
@@ -101,6 +101,8 @@ test("观战服务：静态页、配置、脚本对局、公开 SSE 与信息过
 		assert.equal(config.data.godEnabled, false);
 		assert.deepEqual(config.data.models, []);
 		assert.equal(config.data.defaultModel, null);
+		assert.deepEqual(config.data.boards, ["9p", "12p"]);
+		assert.equal(config.data.defaultBoard, "9p");
 
 		const gameId = await startScriptedGame(url, "server-test");
 		const finished = await waitForFinished(url, gameId);
@@ -142,6 +144,13 @@ test("观战服务：静态页、配置、脚本对局、公开 SSE 与信息过
 			body: JSON.stringify({ mode: "nope" }),
 		});
 		assert.equal(invalidMode.status, 400);
+
+		const invalidBoard = await fetchJson(`${url}/api/games`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ mode: "scripted", board: "nope" }),
+		});
+		assert.equal(invalidBoard.status, 400);
 	} finally {
 		await server.close().catch(() => {});
 		rmSync(runsDir, { recursive: true, force: true });
@@ -185,6 +194,44 @@ test("观战服务：--god 启用后 SSE 包含身份与狼队私密事件", asy
 		);
 		assert.equal(
 			events.every((event: any) => typeof event.seq === "number"),
+			true,
+		);
+	} finally {
+		await server.close().catch(() => {});
+		rmSync(runsDir, { recursive: true, force: true });
+	}
+});
+
+test("观战服务：12 人局公开 SSE 包含上警与警长事件，不泄露身份", async () => {
+	const runsDir = mkdtempSync(join(tmpdir(), "werewolf-server-12p-"));
+	const server = new SpectatorServer({
+		runsDir,
+		port: 0,
+		host: "127.0.0.1",
+		models: [],
+		logger: () => {},
+	});
+	try {
+		const { url } = await server.start();
+		const gameId = await startScriptedGame(url, "server-12p-test", "12p");
+		await waitForFinished(url, gameId);
+
+		const list = await fetchJson(`${url}/api/games`);
+		const item = list.data.games.find((game: any) => game.gameId === gameId);
+		assert.equal(item.playerCount, 12);
+		assert.equal(item.board, "12p");
+
+		const messages = await readSse(`${url}/api/games/${gameId}/events?view=public`);
+		const events = messages
+			.filter((message) => message.event === "game")
+			.map((message) => JSON.parse(message.data));
+		assert.equal(events[0].data?.playerCount, 12);
+		assert.equal(events.some((event: any) => event.type === "sheriff_signup"), true);
+		assert.equal(events.some((event: any) => event.type === "sheriff_speech"), true);
+		assert.equal(events.some((event: any) => event.type === "sheriff_elected"), true);
+		assert.equal(events.some((event: any) => event.type === "role_assigned"), false);
+		assert.equal(
+			events.every((event: any) => event.visibility.kind === "public"),
 			true,
 		);
 	} finally {

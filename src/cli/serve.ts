@@ -7,6 +7,7 @@ const HELP = `用法：node src/cli/serve.ts [选项]
   --port <n>        端口（默认 7331）
   --host <addr>     监听地址（默认 127.0.0.1；0.0.0.0 会暴露到局域网）
   --runs <dir>      对局目录（默认 runs）
+  --board <9p|12p>  新对局默认板子（默认 9p；12p 含警长竞选与白痴）
   --god             启用上帝视角（默认可切换为上帝视角的按钮隐藏）
   --model <id>      前端“真实模型”表单的默认模型
   --thinking <l>    默认 thinking level（默认 low）
@@ -38,6 +39,11 @@ async function main(): Promise<void> {
 	const port = numberArg(args, "port", 7331);
 	const host = stringArg(args, "host", "127.0.0.1")!;
 	const runsDir = stringArg(args, "runs", "runs")!;
+	const boardArg = stringArg(args, "board", "9p")!;
+	if (boardArg !== "9p" && boardArg !== "12p") {
+		throw new Error("--board 必须是 9p 或 12p");
+	}
+	const board = boardArg;
 	const god = boolArg(args, "god");
 	const model = stringArg(args, "model");
 	const thinking = stringArg(args, "thinking", "low")!;
@@ -50,6 +56,7 @@ async function main(): Promise<void> {
 		port,
 		godEnabled: god,
 		model,
+		board,
 		thinkingLevel: thinking,
 		maxDays,
 		timeoutMs,

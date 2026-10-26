@@ -44,6 +44,13 @@
 						<p>脚本对局不需要模型；真实模型会复用 pi 的登录状态。</p>
 					</div>
 					<label class="field">
+						<span>板子</span>
+						<select id="board-select">
+							<option value="9p">9 人局</option>
+							<option value="12p">12 人局 · 上警</option>
+						</select>
+					</label>
+					<label class="field">
 						<span>模式</span>
 						<select id="mode-select">
 							<option value="scripted">脚本对局（快速）</option>
@@ -84,6 +91,7 @@
 						<div class="table-center" id="table-center">
 							<div class="center-day" id="day-label">—</div>
 							<div class="center-phase" id="phase-label">等待对局</div>
+							<div class="center-sheriff" id="sheriff-label">无警长</div>
 							<div class="center-counts">
 								<span>存活 <b id="alive-count">—</b></span>
 								<span>出局 <b id="dead-count">—</b></span>

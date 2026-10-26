@@ -6,6 +6,7 @@ import {
 import type { Model, ThinkingLevel } from "@earendil-works/pi-ai";
 import {
 	type Action,
+	type GameMode,
 	type PlayerPolicy,
 	type PlayerView,
 	type Role,
@@ -36,6 +37,7 @@ export class PiPlayerError extends Error {
 export interface PiPlayerOptions {
 	seat: number;
 	role: Role;
+	mode?: GameMode;
 	model: Model<any>;
 	baseStreamFn: StreamFn;
 	sessionId: string;
@@ -74,14 +76,14 @@ export class PiPlayer implements PlayerPolicy {
 		this.seat = options.seat;
 		this.role = options.role;
 		this.limits = { ...DEFAULT_LIMITS, ...options.limits };
-		this.maxTurnsPerPrompt = options.maxTurnsPerPrompt ?? 6;
+		this.maxTurnsPerPrompt = options.maxTurnsPerPrompt ?? 8;
 		this.onEvent = options.onEvent;
 		const maxTokens = options.maxTokens ?? 2000;
 		const streamFn: StreamFn = (model, context, streamOptions) =>
 			options.baseStreamFn(model, context, { ...streamOptions, maxTokens });
 		this.agent = new Agent({
 			initialState: {
-				systemPrompt: buildSystemPrompt(options.role, options.seat),
+				systemPrompt: buildSystemPrompt(options.role, options.seat, options.mode ?? "9p"),
 				model: options.model,
 				thinkingLevel: options.thinkingLevel ?? "low",
 				tools: [],

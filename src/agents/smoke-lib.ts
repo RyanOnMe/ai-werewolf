@@ -24,21 +24,28 @@ function smokeTurn(): TurnRequest {
 
 function smokeView(turn: TurnRequest): PlayerView {
 	const seats = [1, 2, 3, 4, 5, 6, 7, 8, 9];
-	return {
-		seat: 1,
-		role: "villager",
-		alive: true,
-		day: 1,
-		phase: "day_discuss",
-		players: seats.map((seat) => ({
-			seat,
+		return {
+			seat: 1,
+			role: "villager",
 			alive: true,
-			deathDay: null,
-			deathPhase: null,
-		})),
-		aliveSeats: seats,
-		deadSeats: [],
-		legalTargets: [],
+			mode: "9p",
+			playerCount: 9,
+			day: 1,
+			phase: "day_discuss",
+			players: seats.map((seat) => ({
+				seat,
+				alive: true,
+				deathDay: null,
+				deathPhase: null,
+				revealed: false,
+				canVote: true,
+			})),
+			aliveSeats: seats,
+			deadSeats: [],
+			sheriff: null,
+			sheriffCandidates: [],
+			sheriffVoteWeight: 1.5,
+			legalTargets: [],
 		privateInfo: ["你的身份：villager（好人阵营）", "状态：存活"],
 		newEvents: [],
 		visibleEvents: [],

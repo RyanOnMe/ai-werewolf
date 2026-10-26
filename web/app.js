@@ -7,6 +7,7 @@
 		seer: "预言家",
 		witch: "女巫",
 		hunter: "猎人",
+		idiot: "白痴",
 	};
 	const PHASE_LABELS = {
 		setup: "准备",
@@ -16,6 +17,10 @@
 		dawn: "天亮",
 		last_words: "遗言",
 		hunter_shot: "猎人开枪",
+		sheriff_signup: "上警",
+		sheriff_speech: "竞选发言",
+		sheriff_vote: "警长投票",
+		badge_transfer: "警徽移交",
 		day_discuss: "白天讨论",
 		day_vote: "放逐投票",
 		ended: "游戏结束",
@@ -39,6 +44,12 @@
 		vote_record: "投票",
 		death: "死亡",
 		hunter_shot: "开枪",
+		sheriff_signup: "上警",
+		sheriff_speech: "竞选",
+		sheriff_vote: "警长票",
+		sheriff_elected: "警长",
+		badge_transfer: "警徽",
+		idiot_revealed: "白痴翻牌",
 		game_end: "结束",
 	};
 	const WINNER_LABELS = {
@@ -58,6 +69,12 @@
 		"vote_record",
 		"death",
 		"hunter_shot",
+		"sheriff_signup",
+		"sheriff_speech",
+		"sheriff_vote",
+		"sheriff_elected",
+		"badge_transfer",
+		"idiot_revealed",
 		"game_end",
 	]);
 	const SYSTEM_TYPES = new Set(["phase"]);
@@ -68,11 +85,14 @@
 			godEnabled: false,
 			models: [],
 			defaultModel: null,
+			boards: ["9p", "12p"],
+			defaultBoard: "9p",
 			activeGameId: null,
 			starting: false,
 		},
 		games: [],
 		gameId: null,
+		playerCount: 9,
 		view: "public",
 		events: [],
 		cursor: 0,
@@ -88,6 +108,7 @@
 		retryTimer: null,
 		formError: null,
 		modeInitialized: false,
+		boardInitialized: false,
 	};
 
 	const $ = (id) => document.getElementById(id);
@@ -99,6 +120,7 @@
 		newGameBtn: $("new-game-btn"),
 		newGamePanel: $("new-game-panel"),
 		newGameForm: $("new-game-form"),
+		boardSelect: $("board-select"),
 		modeSelect: $("mode-select"),
 		seedInput: $("seed-input"),
 		modelField: $("model-field"),
@@ -114,6 +136,7 @@
 		seatsRing: $("seats-ring"),
 		dayLabel: $("day-label"),
 		phaseLabel: $("phase-label"),
+		sheriffLabel: $("sheriff-label"),
 		aliveCount: $("alive-count"),
 		deadCount: $("dead-count"),
 		winnerLabel: $("winner-label"),
@@ -260,6 +283,16 @@
 		if (models.length === 0 && el.modeSelect.value === "live") {
 			el.modeSelect.value = "scripted";
 		}
+		const boards = Array.isArray(state.config.boards) && state.config.boards.length > 0
+			? state.config.boards
+			: ["9p", "12p"];
+		if (!state.boardInitialized) {
+			state.boardInitialized = true;
+			el.boardSelect.value = state.config.defaultBoard === "12p" ? "12p" : "9p";
+		}
+		if (!boards.includes(el.boardSelect.value)) {
+			el.boardSelect.value = state.config.defaultBoard === "12p" ? "12p" : "9p";
+		}
 		updateModelField();
 	}
 
@@ -281,6 +314,7 @@
 	function updateStartState() {
 		const models = Array.isArray(state.config.models) ? state.config.models : [];
 		const live = el.modeSelect.value === "live";
+		const boardLabel = el.boardSelect.value === "12p" ? "12 人局（含上警）" : "9 人局";
 		const busy = Boolean(state.config.activeGameId) || Boolean(state.config.starting);
 		el.startGameBtn.disabled = busy || (live && models.length === 0);
 		el.newGameHint.classList.remove("error");
@@ -294,10 +328,10 @@
 			el.newGameHint.textContent =
 				models.length === 0
 					? "没有可用模型；请先运行 pi auth，或用 --model 启动 serve。"
-					: `真实模型：${el.modelSelect.value || state.config.defaultModel || "—"}；一局约 50-80 次请求。`;
+					: `${boardLabel} · 真实模型：${el.modelSelect.value || state.config.defaultModel || "—"}；一局约 50-80 次请求。`;
 			return;
 		}
-		el.newGameHint.textContent = "脚本对局：随机策略，几秒内结束，不需要模型。";
+		el.newGameHint.textContent = `${boardLabel} · 脚本对局：随机策略，几秒内结束，不需要模型。`;
 	}
 
 	async function loadGames() {
@@ -322,11 +356,18 @@
 			return;
 		}
 		el.gameSelect.disabled = false;
-		for (const game of state.games) {
-			const option = document.createElement("option");
-			option.value = game.gameId;
-			const parts = [game.gameId];
-			if (game.status === "finished" && game.winner) {
+			for (const game of state.games) {
+				const option = document.createElement("option");
+				option.value = game.gameId;
+				const parts = [game.gameId];
+				const boardLabel =
+					game.board === "12p" || game.playerCount === 12
+						? "12人"
+						: game.board === "9p" || game.playerCount === 9
+							? "9人"
+							: null;
+				if (boardLabel) parts.push(boardLabel);
+				if (game.status === "finished" && game.winner) {
 				parts.push(winnerLabel(game.winner));
 			} else if (game.status === "error") {
 				parts.push("出错");
@@ -373,6 +414,7 @@
 		state.gameId = gameId;
 		state.events = [];
 		state.cursor = 0;
+		state.playerCount = 9;
 		state.follow = true;
 		state.status = "connecting";
 		state.connected = false;
@@ -398,6 +440,13 @@
 				return;
 			}
 			if (!event || typeof event.seq !== "number") return;
+			if (
+				event.type === "game_start" &&
+				event.data &&
+				(event.data.playerCount === 9 || event.data.playerCount === 12)
+			) {
+				state.playerCount = event.data.playerCount;
+			}
 			const lastSeq = state.events.length ? state.events[state.events.length - 1].seq : 0;
 			if (event.seq <= lastSeq) return;
 			state.events.push(event);
@@ -472,14 +521,28 @@
 	}
 
 	function derive(visible) {
+		let playerCount = state.playerCount === 12 ? 12 : 9;
+		let mode = "9p";
+		for (const event of visible) {
+			if (event.type !== "game_start") continue;
+			const data = event.data || {};
+			if (Number.isInteger(data.playerCount) && data.playerCount > 0) {
+				playerCount = data.playerCount;
+			}
+			if (data.mode === "12p" || data.mode === "9p") mode = data.mode;
+			break;
+		}
+		if (playerCount !== 9 && playerCount !== 12) playerCount = 9;
 		const players = new Map();
-		for (let seat = 1; seat <= 9; seat++) {
-			players.set(seat, { seat, alive: true, death: null });
+		for (let seat = 1; seat <= playerCount; seat++) {
+			players.set(seat, { seat, alive: true, death: null, revealed: false });
 		}
 		const roles = new Map();
 		let day = 1;
 		let phase = "setup";
 		let winner = null;
+		let sheriff = null;
+		let sheriffCandidates = [];
 
 		for (const event of visible) {
 			if (typeof event.day === "number") day = event.day;
@@ -521,11 +584,37 @@
 			}
 
 			if (event.type === "vote_record" && Number.isInteger(data.exiled)) {
-				markDead(players, data.exiled, event.day, event.phase, ["exile"]);
+				if (data.idiotRevealed === true) {
+					const player = players.get(data.exiled);
+					if (player) player.revealed = true;
+				} else {
+					markDead(players, data.exiled, event.day, event.phase, ["exile"]);
+				}
 			}
 
 			if (event.type === "hunter_shot" && Number.isInteger(event.target)) {
 				markDead(players, event.target, event.day, event.phase, ["hunter_shot"]);
+			}
+
+			if (event.type === "idiot_revealed" && Number.isInteger(data.seat)) {
+				const player = players.get(data.seat);
+				if (player) player.revealed = true;
+				roles.set(data.seat, "idiot");
+			}
+
+			if (event.type === "sheriff_signup" && Number.isInteger(data.seat) && data.run === true) {
+				if (!sheriffCandidates.includes(data.seat)) sheriffCandidates.push(data.seat);
+			}
+
+			if (event.type === "sheriff_elected") {
+				sheriff = Number.isInteger(data.seat) ? data.seat : null;
+				if (Array.isArray(data.candidates)) {
+					sheriffCandidates = [...data.candidates].filter((seat) => Number.isInteger(seat));
+				}
+			}
+
+			if (event.type === "badge_transfer") {
+				sheriff = Number.isInteger(data.to) ? data.to : null;
 			}
 
 			if (event.type === "game_end") {
@@ -549,7 +638,22 @@
 				: null;
 		const aliveSeats = [...players.values()].filter((p) => p.alive).map((p) => p.seat);
 		const deadSeats = [...players.values()].filter((p) => !p.alive).map((p) => p.seat);
-		return { players, roles, day, phase, winner, aliveSeats, deadSeats, currentSeat, last };
+		sheriffCandidates.sort((a, b) => a - b);
+		return {
+			players,
+			roles,
+			playerCount,
+			mode,
+			day,
+			phase,
+			winner,
+			aliveSeats,
+			deadSeats,
+			sheriff,
+			sheriffCandidates,
+			currentSeat,
+			last,
+		};
 	}
 
 	// ------------------------------------------------------------------
@@ -594,10 +698,13 @@
 		}
 	}
 
-	function ensureSeats() {
-		if (state.seatEls.length > 0) return;
-		for (let seat = 1; seat <= 9; seat++) {
-			const angle = ((-90 + (seat - 1) * 40) * Math.PI) / 180;
+	function ensureSeats(count) {
+		if (state.seatEls.length === count) return;
+		el.seatsRing.replaceChildren();
+		state.seatEls = [];
+		el.seatsRing.dataset.count = String(count);
+		for (let seat = 1; seat <= count; seat++) {
+			const angle = ((-90 + ((seat - 1) * 360) / count) * Math.PI) / 180;
 			const x = 50 + 39 * Math.cos(angle);
 			const y = 50 + 39 * Math.sin(angle);
 			const root = document.createElement("div");
@@ -611,7 +718,12 @@
 			const num = document.createElement("span");
 			num.className = "num";
 			num.textContent = String(seat);
-			orb.append(num);
+			const mark = document.createElement("span");
+			mark.className = "sheriff-mark";
+			mark.textContent = "★";
+			mark.title = "警长";
+			mark.hidden = true;
+			orb.append(num, mark);
 
 			const meta = document.createElement("div");
 			meta.className = "seat-meta";
@@ -625,24 +737,28 @@
 
 			root.append(orb, meta);
 			el.seatsRing.append(root);
-			state.seatEls.push({ root, role, status });
+			state.seatEls.push({ root, role, status, mark });
 		}
 	}
 
 	function renderSeats(derived) {
-		ensureSeats();
-		for (let seat = 1; seat <= 9; seat++) {
+		ensureSeats(derived.playerCount);
+		for (let seat = 1; seat <= derived.playerCount; seat++) {
 			const refs = state.seatEls[seat - 1];
 			const player = derived.players.get(seat);
 			const role = derived.roles.get(seat);
 			const known = Boolean(role);
 			const death = player ? player.death : null;
 			const current = derived.currentSeat === seat && player && player.alive;
+			const sheriff = derived.sheriff === seat;
 
 			refs.root.classList.toggle("alive", Boolean(player && player.alive));
 			refs.root.classList.toggle("dead", Boolean(player && !player.alive));
 			refs.root.classList.toggle("current", Boolean(current));
+			refs.root.classList.toggle("sheriff", sheriff);
+			refs.root.classList.toggle("revealed", Boolean(player && player.revealed));
 			refs.root.dataset.role = known ? role : "";
+			refs.mark.hidden = !sheriff;
 			refs.role.textContent = known ? roleLabel(role) : "身份未知";
 
 			if (player && !player.alive) {
@@ -654,6 +770,10 @@
 				refs.status.textContent = `${day}出局${cause}`;
 			} else if (current) {
 				refs.status.textContent = "行动中…";
+			} else if (player && player.revealed) {
+				refs.status.textContent = "白痴翻牌 · 无票";
+			} else if (sheriff) {
+				refs.status.textContent = "警长 · 存活";
 			} else {
 				refs.status.textContent = "存活";
 			}
@@ -676,6 +796,19 @@
 			el.phaseLabel.textContent = "加载中…";
 		} else {
 			el.phaseLabel.textContent = phaseLabel(derived.phase);
+		}
+		if (!connected) {
+			el.sheriffLabel.textContent = "—";
+		} else if (derived.sheriff !== null) {
+			el.sheriffLabel.textContent = `警长 ${derived.sheriff}号`;
+		} else if (
+			typeof derived.phase === "string" &&
+			derived.phase.startsWith("sheriff") &&
+			derived.sheriffCandidates.length > 0
+		) {
+			el.sheriffLabel.textContent = `上警：${derived.sheriffCandidates.map((seat) => `${seat}号`).join("、")}`;
+		} else {
+			el.sheriffLabel.textContent = "无警长";
 		}
 		el.aliveCount.textContent = connected ? String(derived.aliveSeats.length) : "—";
 		el.deadCount.textContent = connected ? String(derived.deadSeats.length) : "—";
@@ -745,7 +878,11 @@
 		text.textContent = event.text || "";
 		body.append(text);
 
-		if (event.type === "vote_record" && event.data && event.data.votes) {
+		if (
+			(event.type === "vote_record" || event.type === "sheriff_elected") &&
+			event.data &&
+			event.data.votes
+		) {
 			const chips = document.createElement("div");
 			chips.className = "vote-chips";
 			for (const [seat, target] of Object.entries(event.data.votes)) {
@@ -831,7 +968,7 @@
 		const grid = document.createElement("div");
 		grid.className = "god-grid";
 
-		const groups = { werewolf: [], seer: [], witch: [], hunter: [], villager: [] };
+		const groups = { werewolf: [], seer: [], witch: [], hunter: [], idiot: [], villager: [] };
 		for (const [seat, role] of derived.roles) {
 			if (!groups[role]) groups[role] = [];
 			groups[role].push(seat);
@@ -842,7 +979,7 @@
 				: seats
 						.map((seat) => {
 							const player = derived.players.get(seat);
-							return `${seat}号${player && !player.alive ? "（出局）" : ""}`;
+							return `${seat}号${player && !player.alive ? "（出局）" : ""}${player && player.revealed ? "（翻牌）" : ""}`;
 						})
 						.join("、");
 
@@ -854,7 +991,7 @@
 			);
 		} else {
 			addGodBlock(grid, "狼队", describe(groups.werewolf));
-			const gods = [...groups.seer, ...groups.witch, ...groups.hunter];
+			const gods = [...groups.seer, ...groups.witch, ...groups.hunter, ...groups.idiot];
 			addGodBlock(
 				grid,
 				"神职",
@@ -863,11 +1000,27 @@
 					: gods
 							.map((seat) => {
 								const player = derived.players.get(seat);
-								return `${seat}号${roleLabel(derived.roles.get(seat))}${player && !player.alive ? "（出局）" : ""}`;
+								return `${seat}号${roleLabel(derived.roles.get(seat))}${player && !player.alive ? "（出局）" : ""}${player && player.revealed ? "（翻牌）" : ""}`;
 							})
 							.join("、"),
 			);
 			addGodBlock(grid, "村民", describe(groups.villager));
+		}
+
+		addGodBlock(
+			grid,
+			"警长",
+			derived.sheriff === null
+				? "无警长"
+				: `${derived.sheriff}号（票权 1.5）${derived.sheriffCandidates.length > 0 ? `；候选：${derived.sheriffCandidates.map((seat) => `${seat}号`).join("、")}` : ""}`,
+		);
+		const sheriffEvents = visible.filter((event) => event.type === "sheriff_elected");
+		if (sheriffEvents.length > 0) {
+			addGodBlock(
+				grid,
+				"警长竞选",
+				sheriffEvents.map((event) => event.text).join("\n"),
+			);
 		}
 
 		const seerResults = visible.filter((event) => event.type === "seer_result").slice(-6);
@@ -972,6 +1125,7 @@
 		state.formError = null;
 		hideError();
 		const mode = el.modeSelect.value === "live" ? "live" : "scripted";
+		const board = el.boardSelect.value === "12p" ? "12p" : "9p";
 		const seed = el.seedInput.value.trim() || randomSeed();
 		const model = mode === "live" ? el.modelSelect.value : undefined;
 		el.startGameBtn.disabled = true;
@@ -982,7 +1136,7 @@
 			const result = await fetchJson("/api/games", {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ mode, seed, model }),
+				body: JSON.stringify({ mode, board, seed, model }),
 			});
 			el.newGamePanel.hidden = true;
 			el.seedInput.value = randomSeed();
@@ -1042,6 +1196,7 @@
 		});
 
 		el.modeSelect.addEventListener("change", updateModelField);
+		el.boardSelect.addEventListener("change", updateStartState);
 		el.modelSelect.addEventListener("change", updateStartState);
 		el.newGameForm.addEventListener("submit", startGame);
 		el.errorClose.addEventListener("click", hideError);

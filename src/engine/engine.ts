@@ -1,9 +1,11 @@
 import {
 	DEFAULT_CONFIG,
+	RULESET_12P,
 	type Action,
 	type DeathCause,
 	type EventType,
 	type GameEvent,
+	type GameMode,
 	type GameState,
 	type PlayerState,
 	type PlayerView,
@@ -14,6 +16,7 @@ import {
 	type Winner,
 	type Role,
 	ROLE_LABEL,
+	canVote,
 	factionOf,
 	isGod,
 	RuleError,
@@ -21,7 +24,7 @@ import {
 } from "./types.ts";
 import { createRng, nextSeatWhere, type Rng } from "./rng.ts";
 
-const ROLE_SETUP_9 = [
+export const ROLE_SETUP_9: readonly Role[] = [
 	"werewolf",
 	"werewolf",
 	"werewolf",
@@ -31,13 +34,32 @@ const ROLE_SETUP_9 = [
 	"seer",
 	"witch",
 	"hunter",
-] as const;
+];
+
+export const ROLE_SETUP_12: readonly Role[] = [
+	"werewolf",
+	"werewolf",
+	"werewolf",
+	"werewolf",
+	"villager",
+	"villager",
+	"villager",
+	"villager",
+	"seer",
+	"witch",
+	"hunter",
+	"idiot",
+];
 
 type AutoKind =
 	| "start_night"
 	| "resolve_wolves"
 	| "resolve_night"
 	| "start_day"
+	| "start_day_discussion"
+	| "resolve_sheriff_signup"
+	| "resolve_sheriff_speeches"
+	| "resolve_sheriff_vote"
 	| "start_vote"
 	| "resolve_vote";
 
@@ -52,6 +74,7 @@ type Task = AutoTask | TurnTask;
 export interface EngineOptions {
 	seed: string;
 	gameId?: string;
+	mode?: GameMode;
 	config?: Partial<RulesConfig>;
 	/** 测试/自定义局用：直接指定每个座位的身份，跳过洗牌。 */
 	roles?: Role[];
@@ -81,30 +104,74 @@ export class GameEngine {
 	}
 
 	static create(options: EngineOptions): GameEngine {
-		const config: RulesConfig = { ...DEFAULT_CONFIG, ...options.config };
-		if (config.playerCount !== 9) {
-			throw new RuleError("unsupported_player_count", "v1 只支持 9 人局（3狼、3民、预言家、女巫、猎人）");
+		const requestedMode: GameMode | undefined =
+			options.mode ??
+			options.config?.mode ??
+			(options.roles?.length === 12 || options.config?.playerCount === 12 ? "12p" : undefined);
+		const mode: GameMode = requestedMode === "12p" ? "12p" : "9p";
+		const baseConfig = mode === "12p" ? RULESET_12P : DEFAULT_CONFIG;
+		const config: RulesConfig = {
+			...baseConfig,
+			...options.config,
+			mode,
+			playerCount: baseConfig.playerCount,
+		};
+		if (options.config?.playerCount !== undefined && options.config.playerCount !== baseConfig.playerCount) {
+			throw new RuleError(
+				"unsupported_player_count",
+				`${mode} 只支持 ${baseConfig.playerCount} 名玩家`,
+			);
 		}
 		const seed = options.seed;
 		const gameId = options.gameId ?? `game-${Date.now().toString(36)}`;
 		const rng = createRng(seed);
-		const roles = options.roles ? [...options.roles] : rng.shuffle(ROLE_SETUP_9);
+		const officialSetup = mode === "12p" ? ROLE_SETUP_12 : ROLE_SETUP_9;
+		const roles = options.roles ? [...options.roles] : rng.shuffle(officialSetup);
 		if (roles.length !== config.playerCount) {
 			throw new RuleError("bad_role_setup", `角色数量 ${roles.length} 与玩家数 ${config.playerCount} 不一致`);
 		}
-		const count = (role: Role) => roles.filter((r) => r === role).length;
-		if (count("werewolf") !== 3 || count("villager") !== 3 || count("seer") !== 1 || count("witch") !== 1 || count("hunter") !== 1) {
-			throw new RuleError("bad_role_setup", "v1 需要恰好 3狼、3村民、1预言家、1女巫、1猎人");
+		for (const role of roles) {
+			if (!(role in ROLE_LABEL)) {
+				throw new RuleError("bad_role_setup", `未知身份：${String(role)}`);
+			}
+		}
+		if (!options.roles) {
+			const count = (role: Role) => roles.filter((r) => r === role).length;
+			if (mode === "9p") {
+				if (
+					count("werewolf") !== 3 ||
+					count("villager") !== 3 ||
+					count("seer") !== 1 ||
+					count("witch") !== 1 ||
+					count("hunter") !== 1
+				) {
+					throw new RuleError("bad_role_setup", "9 人局需要恰好 3狼、3村民、1预言家、1女巫、1猎人");
+				}
+			} else if (
+				count("werewolf") !== 4 ||
+				count("villager") !== 4 ||
+				count("seer") !== 1 ||
+				count("witch") !== 1 ||
+				count("hunter") !== 1 ||
+				count("idiot") !== 1
+			) {
+				throw new RuleError(
+					"bad_role_setup",
+					"12 人局需要恰好 4狼、4村民、1预言家、1女巫、1猎人、1白痴",
+				);
+			}
 		}
 		const players: PlayerState[] = roles.map((role, index) => ({
 			seat: index + 1,
 			role,
 			alive: true,
 			death: null,
+			revealed: false,
 		}));
 		const state: GameState = {
 			gameId,
 			seed,
+			mode,
 			day: 1,
 			phase: "setup",
 			players,
@@ -120,14 +187,28 @@ export class GameEngine {
 			seerChecks: [],
 			dayStartSeat: null,
 			votes: {},
+			sheriffVotes: {},
+			sheriff: null,
+			sheriffElectionHeld: false,
+			sheriffCandidates: [],
 			winner: null,
 			endReason: null,
 		};
 		const engine = new GameEngine(state, config, rng, options.clock ?? (() => new Date().toISOString()));
 
+		const setupText =
+			mode === "12p"
+				? "12人局开始：4狼人、4村民、预言家、女巫、猎人、白痴。第 1 天将进行警长竞选；狼人杀光所有村民或所有神职即获胜；好人放逐所有狼人即获胜。"
+				: "9人局开始：3狼人、3村民、预言家、女巫、猎人。狼人杀光所有村民或所有神职即获胜；好人放逐所有狼人即获胜。";
 		engine.emit("game_start", { kind: "public" }, {
-			text: "9人局开始：3狼人、3村民、预言家、女巫、猎人。狼人杀光所有村民或所有神职即获胜；好人放逐所有狼人即获胜。",
-			data: { playerCount: 9, roleSetup: ROLE_SETUP_9 },
+			text: setupText,
+			data: {
+				playerCount: config.playerCount,
+				mode,
+				roleSetup: officialSetup,
+				sheriffEnabled: config.sheriffEnabled,
+				nightLastWords: config.nightLastWords,
+			},
 		});
 		for (const player of players) {
 			engine.emit("role_assigned", { kind: "judge" }, {
@@ -251,6 +332,18 @@ export class GameEngine {
 				return;
 			case "start_day":
 				this.startDay();
+				return;
+			case "start_day_discussion":
+				this.startDayDiscussion();
+				return;
+			case "resolve_sheriff_signup":
+				this.resolveSheriffSignup();
+				return;
+			case "resolve_sheriff_speeches":
+				this.resolveSheriffSpeeches();
+				return;
+			case "resolve_sheriff_vote":
+				this.resolveSheriffVote();
 				return;
 			case "start_vote":
 				this.startVote();
@@ -378,12 +471,14 @@ export class GameEngine {
 		if (winner) {
 			this.state.winner = winner;
 			this.state.endReason = "夜晚死亡后胜负已分";
-			for (const seat of deadSeats) this.queue.push({ t: "turn", kind: "last_words", seat });
 			this.queue.push({ t: "auto", kind: "end_game" });
 			return;
 		}
 
-		for (const seat of deadSeats) this.queue.push({ t: "turn", kind: "last_words", seat });
+		if (this.config.nightLastWords) {
+			for (const seat of deadSeats) this.queue.push({ t: "turn", kind: "last_words", seat });
+		}
+		for (const seat of deadSeats) this.queueBadgeTransfer(seat);
 		const hunter = this.eligibleHunter(deadSeats);
 		if (hunter !== null) {
 			this.queue.push({ t: "turn", kind: "hunter_shoot", seat: hunter });
@@ -392,6 +487,122 @@ export class GameEngine {
 	}
 
 	private startDay(): void {
+		if (this.state.day === 1 && this.config.sheriffEnabled && !this.state.sheriffElectionHeld) {
+			this.startSheriffElection();
+			return;
+		}
+		this.startDayDiscussion();
+	}
+
+	private startSheriffElection(): void {
+		this.state.phase = "sheriff_signup";
+		this.state.sheriffCandidates = [];
+		this.state.sheriffVotes = {};
+		const alive = this.aliveSeats();
+		this.emit("phase", { kind: "public" }, {
+			text: "第 1 天警长竞选开始。所有存活玩家选择是否上警；上警玩家随后公开发言，警下玩家投票选出警长。",
+			data: { candidates: [], alive },
+		});
+		for (const seat of alive) {
+			this.queue.push({ t: "turn", kind: "sheriff_signup", seat });
+		}
+		this.queue.push({ t: "auto", kind: "resolve_sheriff_signup" });
+	}
+
+	private resolveSheriffSignup(): void {
+		const candidates = [...this.state.sheriffCandidates].sort((a, b) => a - b);
+		this.emit("sheriff_signup", { kind: "public" }, {
+			text:
+				candidates.length === 0
+					? "无人上警。"
+					: `上警玩家：${candidates.map(seatLabel).join("、")}。其余玩家警下。`,
+			data: { candidates },
+		});
+		if (candidates.length === 0) {
+			this.electSheriff(null, {}, {}, "无人上警，本局没有警长");
+			return;
+		}
+		this.state.phase = "sheriff_speech";
+		this.emit("phase", { kind: "public" }, {
+			text: `上警玩家：${candidates.map(seatLabel).join("、")}。请依次发表竞选发言。`,
+			data: { candidates },
+		});
+		for (const seat of candidates) {
+			this.queue.push({ t: "turn", kind: "sheriff_speech", seat });
+		}
+		this.queue.push({ t: "auto", kind: "resolve_sheriff_speeches" });
+	}
+
+	private resolveSheriffSpeeches(): void {
+		const candidates = [...this.state.sheriffCandidates].sort((a, b) => a - b);
+		if (candidates.length === 0) {
+			this.electSheriff(null, {}, {}, "没有有效候选人");
+			return;
+		}
+		if (candidates.length === 1) {
+			this.electSheriff(candidates[0]!, {}, {}, "唯一上警候选人自动当选");
+			return;
+		}
+		const candidateSet = new Set(candidates);
+		const voters = this.aliveSeats().filter((seat) => !candidateSet.has(seat));
+		if (voters.length === 0) {
+			this.electSheriff(null, {}, {}, "全员上警，无人可投票，本局没有警长");
+			return;
+		}
+		this.state.phase = "sheriff_vote";
+		this.state.sheriffVotes = {};
+		this.emit("phase", { kind: "public" }, {
+			text: `竞选发言结束。警下玩家开始投票；候选人：${candidates.map(seatLabel).join("、")}。`,
+			data: { candidates, voters },
+		});
+		for (const seat of voters) {
+			this.queue.push({ t: "turn", kind: "sheriff_vote", seat });
+		}
+		this.queue.push({ t: "auto", kind: "resolve_sheriff_vote" });
+	}
+
+	private resolveSheriffVote(): void {
+		const votes = this.state.sheriffVotes;
+		const counts = new Map<number, number>();
+		for (const target of Object.values(votes)) {
+			if (typeof target === "number") {
+				counts.set(target, (counts.get(target) ?? 0) + 1);
+			}
+		}
+		let max = 0;
+		for (const count of counts.values()) max = Math.max(max, count);
+		const top = [...counts.entries()].filter(([, count]) => count === max).map(([seat]) => seat);
+		const elected = top.length === 1 && max > 0 ? top[0]! : null;
+		const reason =
+			elected === null
+				? "警长竞选平票或无人得票，本局没有警长"
+				: `${seatLabel(elected)} 当选警长`;
+		this.electSheriff(elected, votes, Object.fromEntries(counts), reason);
+	}
+
+	private electSheriff(
+		seat: number | null,
+		votes: Record<number, number | "abstain">,
+		tally: Record<number, number>,
+		reason: string,
+	): void {
+		this.state.sheriffElectionHeld = true;
+		this.state.sheriff = seat;
+		this.emit("sheriff_elected", { kind: "public" }, {
+			target: seat,
+			text: reason,
+			data: {
+				seat,
+				candidates: [...this.state.sheriffCandidates].sort((a, b) => a - b),
+				votes: { ...votes },
+				tally,
+				reason,
+			},
+		});
+		this.queue.push({ t: "auto", kind: "start_day_discussion" });
+	}
+
+	private startDayDiscussion(): void {
 		this.state.phase = "day_discuss";
 		const alive = this.aliveSeats();
 		if (alive.length === 0) {
@@ -408,9 +619,16 @@ export class GameEngine {
 				nextSeatWhere(previous, this.config.playerCount, (seat) => this.player(seat).alive) ?? alive[0]!;
 		}
 		const order = this.speakingOrder();
+		const sheriffText =
+			this.state.sheriff === null ? "本局无警长。" : `警长：${seatLabel(this.state.sheriff)}。`;
 		this.emit("phase", { kind: "public" }, {
-			text: `第 ${this.state.day} 天白天开始。存活：${alive.map(seatLabel).join("、")}。发言从 ${seatLabel(order[0] ?? this.state.dayStartSeat)} 开始。`,
-			data: { alive, startSeat: this.state.dayStartSeat, order },
+			text: `第 ${this.state.day} 天白天开始。${sheriffText}存活：${alive.map(seatLabel).join("、")}。发言从 ${seatLabel(order[0] ?? this.state.dayStartSeat)} 开始。`,
+			data: {
+				alive,
+				startSeat: this.state.dayStartSeat,
+				order,
+				sheriff: this.state.sheriff,
+			},
 		});
 		for (const seat of order) {
 			this.queue.push({ t: "turn", kind: "day_speech", seat });
@@ -421,10 +639,14 @@ export class GameEngine {
 	private startVote(): void {
 		this.state.phase = "day_vote";
 		this.state.votes = {};
-		const order = this.speakingOrder();
+		const order = this.speakingOrder().filter((seat) => canVote(this.player(seat)));
+		const sheriffText =
+			this.state.sheriff === null
+				? ""
+				: `警长 ${seatLabel(this.state.sheriff)} 的票权为 ${this.config.sheriffVoteWeight}。`;
 		this.emit("phase", { kind: "public" }, {
-			text: "发言结束，现在开始放逐投票。",
-			data: { order },
+			text: `发言结束，现在开始放逐投票。${sheriffText}`,
+			data: { order, sheriff: this.state.sheriff, sheriffVoteWeight: this.config.sheriffVoteWeight },
 		});
 		for (const seat of order) {
 			this.queue.push({ t: "turn", kind: "day_vote", seat });
@@ -435,16 +657,20 @@ export class GameEngine {
 	private resolveVote(): void {
 		const votes = this.state.votes;
 		const counts = new Map<number, number>();
-		for (const vote of Object.values(votes)) {
-			if (typeof vote === "number") {
-				counts.set(vote, (counts.get(vote) ?? 0) + 1);
-			}
+		for (const [seatText, target] of Object.entries(votes)) {
+			if (typeof target !== "number") continue;
+			const voter = Number(seatText);
+			const weight = voter === this.state.sheriff ? this.config.sheriffVoteWeight : 1;
+			counts.set(target, (counts.get(target) ?? 0) + weight);
 		}
 		let max = 0;
 		for (const count of counts.values()) max = Math.max(max, count);
 		const top = [...counts.entries()].filter(([, count]) => count === max).map(([seat]) => seat);
 		const exiled = top.length === 1 && max > 0 ? top[0]! : null;
-		const voteText = this.formatVoteRecord(votes, counts, exiled);
+		const exiledPlayer = exiled === null ? null : this.player(exiled);
+		const idiotReveal =
+			exiledPlayer !== null && exiledPlayer.role === "idiot" && !exiledPlayer.revealed;
+		const voteText = this.formatVoteRecord(votes, counts, exiled, idiotReveal);
 		this.emit("vote_record", { kind: "public" }, {
 			text: voteText,
 			target: exiled,
@@ -452,17 +678,31 @@ export class GameEngine {
 				votes: { ...votes },
 				tally: Object.fromEntries(counts),
 				exiled,
+				idiotRevealed: idiotReveal,
+				sheriff: this.state.sheriff,
+				sheriffVoteWeight: this.config.sheriffVoteWeight,
 			},
 		});
 
-		if (exiled === null) {
+		if (exiled === null || exiledPlayer === null) {
 			this.queue.push({ t: "auto", kind: "post_deaths", next: "night" });
 			return;
 		}
 
-		const player = this.player(exiled);
-		player.alive = false;
-		player.death = { day: this.state.day, phase: "day_vote", causes: ["exile"] };
+		if (idiotReveal) {
+			exiledPlayer.revealed = true;
+			this.emit("idiot_revealed", { kind: "public" }, {
+				actor: exiled,
+				target: exiled,
+				text: `${seatLabel(exiled)} 翻牌白痴，免于放逐，但失去投票权。`,
+				data: { seat: exiled },
+			});
+			this.queue.push({ t: "auto", kind: "post_deaths", next: "night" });
+			return;
+		}
+
+		exiledPlayer.alive = false;
+		exiledPlayer.death = { day: this.state.day, phase: "day_vote", causes: ["exile"] };
 		this.emit("death", { kind: "judge" }, {
 			actor: exiled,
 			text: `${seatLabel(exiled)} 被放逐出局`,
@@ -479,11 +719,27 @@ export class GameEngine {
 		}
 
 		this.queue.push({ t: "turn", kind: "last_words", seat: exiled });
+		this.queueBadgeTransfer(exiled);
 		const hunter = this.eligibleHunter([exiled]);
 		if (hunter !== null) {
 			this.queue.push({ t: "turn", kind: "hunter_shoot", seat: hunter });
 		}
 		this.queue.push({ t: "auto", kind: "post_deaths", next: "night" });
+	}
+
+	private queueBadgeTransfer(deadSeat: number): void {
+		if (this.state.sheriff !== deadSeat) return;
+		const targets = this.aliveSeats().filter((seat) => seat !== deadSeat);
+		if (targets.length === 0) {
+			this.state.sheriff = null;
+			this.emit("badge_transfer", { kind: "public" }, {
+				actor: deadSeat,
+				text: `${seatLabel(deadSeat)} 出局且无人可接警徽，警徽销毁。`,
+				data: { from: deadSeat, to: null },
+			});
+			return;
+		}
+		this.queue.push({ t: "turn", kind: "badge_transfer", seat: deadSeat });
 	}
 
 	private postDeaths(next: "day" | "night"): void {
@@ -542,7 +798,12 @@ export class GameEngine {
 	private buildTurn(task: TurnTask): TurnRequest | null {
 		const player = this.player(task.seat);
 		const turnId = `T${this.turnCounter + 1}`;
-		if (task.kind !== "last_words" && task.kind !== "hunter_shoot" && !player.alive) {
+		if (
+			task.kind !== "last_words" &&
+			task.kind !== "hunter_shoot" &&
+			task.kind !== "badge_transfer" &&
+			!player.alive
+		) {
 			this.emit("action_rejected", { kind: "judge" }, {
 				actor: task.seat,
 				text: `跳过已出局玩家的 ${task.kind}`,
@@ -611,6 +872,66 @@ export class GameEngine {
 					witchVictim: victim,
 				};
 			}
+			case "sheriff_signup": {
+				if (!player.alive) return null;
+				this.state.phase = "sheriff_signup";
+				return {
+					id: turnId,
+					kind: "sheriff_signup",
+					seat: task.seat,
+					day: this.state.day,
+					phase: this.state.phase,
+					legalTargets: [],
+					promptHint:
+						"现在是第 1 天警长竞选的上警环节。请调用 sheriff_run 选择 run=true（上警）或 run=false（不上警）。上警会公开发言并接受警下投票；警长有 1.5 票放逐票权，死亡时可以移交警徽。请根据阵营收益和暴露风险决定。",
+				};
+			}
+			case "sheriff_speech": {
+				if (!player.alive || !this.state.sheriffCandidates.includes(task.seat)) return null;
+				this.state.phase = "sheriff_speech";
+				return {
+					id: turnId,
+					kind: "sheriff_speech",
+					seat: task.seat,
+					day: this.state.day,
+					phase: this.state.phase,
+					legalTargets: [],
+					sheriffCandidates: [...this.state.sheriffCandidates].sort((a, b) => a - b),
+					promptHint:
+						"你是警上候选人。请调用 sheriff_say 发表竞选发言：说明上警目的、身份或站边、对当前局势的判断，以及拿到警徽后的验人/归票计划。狼人可以悍跳和编造警徽流；好人要给出可信的带队方案。不要只说“我上警”。",
+				};
+			}
+			case "sheriff_vote": {
+				if (!player.alive || this.state.sheriffCandidates.includes(task.seat)) return null;
+				this.state.phase = "sheriff_vote";
+				const candidates = [...this.state.sheriffCandidates].sort((a, b) => a - b);
+				return {
+					id: turnId,
+					kind: "sheriff_vote",
+					seat: task.seat,
+					day: this.state.day,
+					phase: this.state.phase,
+					legalTargets: candidates,
+					sheriffCandidates: candidates,
+					promptHint:
+						"请调用 sheriff_vote 投给一名警上候选人，或 abstain 弃票。比较候选人的身份可信度、站边、警徽流和带队价值；警徽会给对方阵营带来 1.5 票和移交警徽的能力。",
+				};
+			}
+			case "badge_transfer": {
+				if (this.state.sheriff !== task.seat) return null;
+				this.state.phase = "badge_transfer";
+				return {
+					id: turnId,
+					kind: "badge_transfer",
+					seat: task.seat,
+					day: this.state.day,
+					phase: this.state.phase,
+					legalTargets: this.aliveSeats().filter((seat) => seat !== task.seat),
+					isSheriff: true,
+					promptHint:
+						"你是警长且已出局。请调用 transfer_badge 把警徽交给一名存活玩家，或传 target: null 销毁警徽。优先交给可信的好人；交给狼人会让对方获得 1.5 票和警徽。没有可信目标时宁可销毁。",
+				};
+			}
 			case "last_words": {
 				if (player.alive) return null;
 				this.state.phase = "last_words";
@@ -654,8 +975,12 @@ export class GameEngine {
 				};
 			}
 			case "day_vote": {
-				if (!player.alive) return null;
+				if (!player.alive || !canVote(player)) return null;
 				this.state.phase = "day_vote";
+				const sheriffHint =
+					this.state.sheriff === task.seat
+						? `你是警长，本票权重为 ${this.config.sheriffVoteWeight}。`
+						: "";
 				return {
 					id: turnId,
 					kind: "day_vote",
@@ -665,7 +990,8 @@ export class GameEngine {
 					legalTargets: this.aliveSeats().filter(
 						(seat) => this.config.allowSelfVote || seat !== task.seat,
 					),
-					promptHint: `请调用 vote 选择一名要放逐的存活玩家（不能投自己），或选择 abstain 弃票。`,
+					isSheriff: this.state.sheriff === task.seat,
+					promptHint: `${sheriffHint}请调用 vote 选择一名要放逐的存活玩家，或选择 abstain 弃票。投票前先想清楚：这一票是否能推动你的阵营获胜，以及投给谁会让别人怎么判断你的身份。`,
 				};
 			}
 		}
@@ -779,6 +1105,85 @@ export class GameEngine {
 				}
 				return;
 			}
+			case "sheriff_signup": {
+				if (!player.alive) throw new RuleError("dead_signup", "已出局玩家不能参加警长竞选");
+				this.state.phase = "sheriff_signup";
+				if (action.run && !this.state.sheriffCandidates.includes(action.seat)) {
+					this.state.sheriffCandidates.push(action.seat);
+				}
+				this.emit("sheriff_signup", { kind: "public" }, {
+					actor: action.seat,
+					text: action.run ? `${seatLabel(action.seat)} 上警。` : `${seatLabel(action.seat)} 不上警。`,
+					data: { seat: action.seat, run: action.run },
+				});
+				return;
+			}
+			case "sheriff_speech": {
+				if (!player.alive || !this.state.sheriffCandidates.includes(action.seat)) {
+					throw new RuleError("not_sheriff_candidate", "只有存活的警上候选人可以发表竞选发言");
+				}
+				if (action.text.length === 0 || action.text.length > this.config.maxSpeechChars) {
+					throw new RuleError("bad_sheriff_speech", `竞选发言长度必须在 1-${this.config.maxSpeechChars} 字之间`);
+				}
+				this.state.phase = "sheriff_speech";
+				this.emit("sheriff_speech", { kind: "public" }, {
+					actor: action.seat,
+					text: action.text,
+				});
+				return;
+			}
+			case "sheriff_vote": {
+				if (!player.alive || this.state.sheriffCandidates.includes(action.seat)) {
+					throw new RuleError("not_sheriff_voter", "只有存活的警下玩家可以投警长票");
+				}
+				if (action.target === "abstain") {
+					if (!this.config.allowAbstain) throw new RuleError("abstain_forbidden", "当前规则不允许弃票");
+				} else if (!this.state.sheriffCandidates.includes(action.target)) {
+					throw new RuleError("not_sheriff_candidate", "只能投给警上候选人");
+				}
+				if (this.state.sheriffVotes[action.seat] !== undefined) {
+					throw new RuleError("already_voted", "本回合已经投过警长票了");
+				}
+				this.state.phase = "sheriff_vote";
+				this.state.sheriffVotes[action.seat] = action.target;
+				this.emit("sheriff_vote", { kind: "public" }, {
+					actor: action.seat,
+					target: typeof action.target === "number" ? action.target : null,
+					text:
+						action.target === "abstain"
+							? `${seatLabel(action.seat)} 警长票弃票`
+							: `${seatLabel(action.seat)} 警长票投给 ${seatLabel(action.target)}`,
+					data: { vote: action.target },
+				});
+				return;
+			}
+			case "badge_transfer": {
+				if (this.state.sheriff !== action.seat) {
+					throw new RuleError("not_sheriff", "只有当前警长可以移交警徽");
+				}
+				if (player.alive) throw new RuleError("alive_sheriff", "存活警长不能移交警徽");
+				this.state.phase = "badge_transfer";
+				if (action.target === null) {
+					this.state.sheriff = null;
+					this.emit("badge_transfer", { kind: "public" }, {
+						actor: action.seat,
+						text: `${seatLabel(action.seat)} 销毁了警徽。`,
+						data: { from: action.seat, to: null },
+					});
+					return;
+				}
+				const target = this.player(action.target);
+				if (!target.alive) throw new RuleError("target_dead", "不能把警徽交给已出局玩家");
+				if (target.seat === action.seat) throw new RuleError("self_badge", "不能把警徽交给自己");
+				this.state.sheriff = action.target;
+				this.emit("badge_transfer", { kind: "public" }, {
+					actor: action.seat,
+					target: action.target,
+					text: `${seatLabel(action.seat)} 把警徽交给了 ${seatLabel(action.target)}。`,
+					data: { from: action.seat, to: action.target },
+				});
+				return;
+			}
 			case "last_words": {
 				if (player.alive) throw new RuleError("alive_last_words", "存活玩家不能发表遗言");
 				if (action.text.length === 0 || action.text.length > this.config.maxLastWordsChars) {
@@ -818,6 +1223,23 @@ export class GameEngine {
 					data: { causes: ["hunter_shot"] },
 				});
 				this.queue.unshift({ t: "turn", kind: "last_words", seat: action.target });
+				if (this.state.sheriff === action.target && this.computeWinner() === null) {
+					const badgeTargets = this.aliveSeats().filter((seat) => seat !== action.target);
+					if (badgeTargets.length > 0) {
+						this.queue.splice(1, 0, {
+							t: "turn",
+							kind: "badge_transfer",
+							seat: action.target,
+						});
+					} else {
+						this.state.sheriff = null;
+						this.emit("badge_transfer", { kind: "public" }, {
+							actor: action.target,
+							text: `${seatLabel(action.target)} 出局且无人可接警徽，警徽销毁。`,
+							data: { from: action.target, to: null },
+						});
+					}
+				}
 				return;
 			}
 			case "day_speech": {
@@ -834,6 +1256,7 @@ export class GameEngine {
 			}
 			case "day_vote": {
 				if (!player.alive) throw new RuleError("dead_vote", "已出局玩家不能投票");
+				if (!canVote(player)) throw new RuleError("idiot_cannot_vote", "翻牌白痴失去投票权");
 				if (action.target === "abstain") {
 					if (!this.config.allowAbstain) throw new RuleError("abstain_forbidden", "当前规则不允许弃票");
 				} else {
@@ -891,22 +1314,33 @@ export class GameEngine {
 		votes: Record<number, number | "abstain">,
 		counts: Map<number, number>,
 		exiled: number | null,
+		idiotReveal: boolean,
 	): string {
 		const parts = Object.entries(votes)
 			.sort(([a], [b]) => Number(a) - Number(b))
 			.map(([seat, target]) => {
 				const targetText = target === "abstain" ? "弃票" : seatLabel(target);
-				return `${seatLabel(Number(seat))}→${targetText}`;
+				const weight =
+					Number(seat) === this.state.sheriff
+						? `(${this.config.sheriffVoteWeight}票)`
+						: "";
+				return `${seatLabel(Number(seat))}${weight}→${targetText}`;
 			});
 		const tally = [...counts.entries()]
 			.sort((a, b) => b[1] - a[1])
-			.map(([seat, count]) => `${seatLabel(seat)} ${count}票`)
+			.map(([seat, count]) => `${seatLabel(seat)} ${Number.isInteger(count) ? count : count.toFixed(1)}票`)
 			.join("，");
 		const result =
 			exiled === null
 				? "平票或无人得票，无人被放逐。"
-				: `${seatLabel(exiled)} 被放逐出局。`;
-		return `投票结果：${parts.length > 0 ? parts.join("，") : "无人投票"}。${tally ? `票数：${tally}。` : ""}${result}`;
+				: idiotReveal
+					? `${seatLabel(exiled)} 被放逐，但亮出白痴身份免于出局。`
+					: `${seatLabel(exiled)} 被放逐出局。`;
+		const sheriffText =
+			this.state.sheriff === null
+				? ""
+				: `警长 ${seatLabel(this.state.sheriff)} 的票权为 ${this.config.sheriffVoteWeight}。`;
+		return `投票结果：${parts.length > 0 ? parts.join("，") : "无人投票"}。${sheriffText}${tally ? `票数：${tally}。` : ""}${result}`;
 	}
 
 	private emit(
@@ -957,6 +1391,7 @@ export function makePlayerView(
 	turn: TurnRequest,
 	seat: number,
 	lastDeliveredSeq: number,
+	sheriffVoteWeight = 1.5,
 ): PlayerView {
 	const player = state.players[seat - 1];
 	if (!player) throw new RuleError("bad_seat", `没有 ${seat} 号玩家`);
@@ -972,7 +1407,15 @@ export function makePlayerView(
 		"default_action",
 		"turn_start",
 	]);
-	const ownEcho = new Set<EventType>(["speech", "last_words", "wolf_speech", "wolf_vote"]);
+	const ownEcho = new Set<EventType>([
+		"speech",
+		"last_words",
+		"wolf_speech",
+		"wolf_vote",
+		"sheriff_signup",
+		"sheriff_speech",
+		"sheriff_vote",
+	]);
 	const newEvents = visibleEvents.filter(
 		(event) =>
 			event.seq > lastDeliveredSeq &&
@@ -986,17 +1429,24 @@ export function makePlayerView(
 		alive: p.alive,
 		deathDay: p.death?.day ?? null,
 		deathPhase: p.death?.phase ?? null,
+		revealed: p.revealed,
+		canVote: canVote(p),
 	}));
-	const privateInfo = buildPrivateInfo(state, seat);
+	const privateInfo = buildPrivateInfo(state, seat, sheriffVoteWeight);
 	return {
 		seat,
 		role: player.role,
 		alive: player.alive,
+		mode: state.mode,
+		playerCount: state.players.length,
 		day: state.day,
 		phase: state.phase,
 		players,
 		aliveSeats,
 		deadSeats,
+		sheriff: state.sheriff,
+		sheriffCandidates: [...state.sheriffCandidates],
+		sheriffVoteWeight,
 		legalTargets: turn.legalTargets,
 		privateInfo,
 		newEvents,
@@ -1006,12 +1456,20 @@ export function makePlayerView(
 	};
 }
 
-export function buildPrivateInfo(state: GameState, seat: number): string[] {
+export function buildPrivateInfo(state: GameState, seat: number, sheriffVoteWeight = 1.5): string[] {
 	const player = state.players[seat - 1];
 	if (!player) throw new RuleError("bad_seat", `没有 ${seat} 号玩家`);
 	const info: string[] = [];
 	info.push(`你的身份：${ROLE_LABEL[player.role]}（${player.role === "werewolf" ? "狼人阵营" : "好人阵营"}）`);
-	info.push(`状态：${player.alive ? "存活" : "已出局"}`);
+	info.push(`状态：${player.alive ? "存活" : "已出局"}${player.revealed ? "（白痴已翻牌，失去投票权）" : ""}`);
+	info.push(
+		state.sheriff === null
+			? "当前警长：无"
+			: `当前警长：${seatLabel(state.sheriff)}${state.sheriff === seat ? "（你）" : ""}`,
+	);
+	if (state.sheriff === seat) {
+		info.push(`警长票权：${sheriffVoteWeight} 票（放逐投票）；出局时可以移交警徽。`);
+	}
 	if (player.role === "werewolf") {
 		const teammates = state.players.filter((p) => p.role === "werewolf" && p.seat !== seat);
 		if (teammates.length === 0) {
@@ -1049,6 +1507,13 @@ export function buildPrivateInfo(state: GameState, seat: number): string[] {
 	}
 	if (player.role === "hunter") {
 		info.push("技能：被狼人杀害或被放逐时，出局后可以开枪；被女巫毒杀时不能开枪。");
+	}
+	if (player.role === "idiot") {
+		info.push(
+			player.revealed
+				? "白痴技能：你已翻牌，仍然存活但失去放逐投票权；再次被放逐会正常出局。"
+				: "白痴技能：第一次被放逐时翻牌免死，但失去放逐投票权；被狼刀/毒杀/猎人开枪会正常出局。",
+		);
 	}
 	return info;
 }

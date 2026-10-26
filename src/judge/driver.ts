@@ -74,6 +74,7 @@ export async function driveGame(engine: GameEngine, options: DriveOptions): Prom
 			turn,
 			turn.seat,
 			lastDelivered.get(turn.seat) ?? 0,
+			engine.config.sheriffVoteWeight,
 		);
 		view.brief = buildBrief(view);
 		options.onTurn?.(turn, view);

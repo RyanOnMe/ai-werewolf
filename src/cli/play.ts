@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { type AgentEvent } from "@earendil-works/pi-agent-core";
 import {
 	type GameEvent,
+	type GameMode,
 	type PlayerPolicy,
 	type PlayerView,
 	type Role,
@@ -23,6 +24,7 @@ const HELP = `用法：node src/cli/play.ts [选项]
   --seed <string>       随机种子（默认当前时间）
   --game-id <string>    对局 ID（默认 seed + 时间戳）
   --out <dir>           输出目录（默认 runs/<gameId>）
+  --mode <9p|12p>       板子（默认 9p；12p 含警长竞选与白痴）
   --scripted            使用无 LLM 的随机策略（不需要模型鉴权）
   --model <provider/id> 玩家模型，例如 openai-codex/gpt-5.6-luna
   --thinking <level>    minimal|low|medium|high|xhigh|max（默认 low）
@@ -61,6 +63,7 @@ function printSummary(result: GameRunResult): void {
 	console.log(
 		`=== ${winnerText} · 第 ${result.days} 天 · ${result.events.length} 条事件 · ${(result.durationMs / 1000).toFixed(1)}s ===`,
 	);
+	console.log(`板子：${result.mode === "12p" ? "12 人局（上警/白痴）" : "9 人局"}`);
 	if (end?.data?.roles) {
 		const roles = end.data.roles as Record<string, string>;
 		console.log(
@@ -103,6 +106,11 @@ async function main(): Promise<void> {
 	);
 	const outDir = stringArg({ values, positionals: [] }, "out", join("runs", gameId))!;
 	const scripted = boolArg({ values, positionals: [] }, "scripted");
+	const board = stringArg({ values, positionals: [] }, "mode", "9p")!;
+	if (board !== "9p" && board !== "12p") {
+		throw new Error("--mode 必须是 9p 或 12p");
+	}
+	const gameMode: GameMode = board;
 	const showPrivate = boolArg({ values, positionals: [] }, "show-private");
 	const verbose = boolArg({ values, positionals: [] }, "verbose");
 	const quiet = boolArg({ values, positionals: [] }, "quiet");
@@ -149,6 +157,7 @@ async function main(): Promise<void> {
 		return new PiPlayer({
 			seat,
 			role,
+			mode: engine.state.mode,
 			model: pi.model,
 			baseStreamFn: pi.runtime.streamSimple.bind(pi.runtime),
 			sessionId: `${gameId}-seat-${seat}`,
@@ -180,6 +189,7 @@ async function main(): Promise<void> {
 		const result = await runGame({
 			seed,
 			gameId,
+			mode: gameMode,
 			outDir,
 			timeoutMs,
 			policyFactory,
@@ -188,6 +198,7 @@ async function main(): Promise<void> {
 			config: { maxDays },
 			metadata: {
 				mode: scripted ? "scripted" : "pi-agent",
+				board: gameMode,
 				model: loaded ? `${loaded.provider}/${loaded.modelId}` : null,
 				thinkingLevel: loaded?.thinkingLevel ?? null,
 			},

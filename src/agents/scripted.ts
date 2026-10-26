@@ -74,6 +74,38 @@ export class RandomPolicy implements PlayerPolicy {
 				}
 				return { kind: "hunter_shoot", seat: this.seat, target: null };
 			}
+			case "sheriff_signup":
+				return {
+					kind: "sheriff_signup",
+					seat: this.seat,
+					run: this.rng.next() < 0.5,
+				};
+			case "sheriff_speech":
+				return {
+					kind: "sheriff_speech",
+					seat: this.seat,
+					text: "我上警是为了拿警徽带队。我会根据发言和投票找狼，拿到警徽后优先验高影响力玩家。",
+				};
+			case "sheriff_vote": {
+				if (turn.legalTargets.length === 0 || this.rng.next() < 0.2) {
+					return { kind: "sheriff_vote", seat: this.seat, target: "abstain" };
+				}
+				return {
+					kind: "sheriff_vote",
+					seat: this.seat,
+					target: this.rng.pick(turn.legalTargets),
+				};
+			}
+			case "badge_transfer": {
+				if (turn.legalTargets.length === 0 || this.rng.next() < 0.25) {
+					return { kind: "badge_transfer", seat: this.seat, target: null };
+				}
+				return {
+					kind: "badge_transfer",
+					seat: this.seat,
+					target: this.rng.pick(turn.legalTargets),
+				};
+			}
 			case "day_speech": {
 				if (others.length === 0 || this.rng.next() < 0.25) {
 					return { kind: "day_speech", seat: this.seat, text: "我暂时没有信息，先过。" };

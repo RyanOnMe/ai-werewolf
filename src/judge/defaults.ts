@@ -17,6 +17,18 @@ export function defaultActionFor(view: PlayerView): Action {
 			return { kind: "last_words", seat: turn.seat, text: "（无遗言）" };
 		case "hunter_shoot":
 			return { kind: "hunter_shoot", seat: turn.seat, target: null };
+		case "sheriff_signup":
+			return { kind: "sheriff_signup", seat: turn.seat, run: false };
+		case "sheriff_speech":
+			return {
+				kind: "sheriff_speech",
+				seat: turn.seat,
+				text: "我上警，先听其他候选人的发言，再给出我的判断。",
+			};
+		case "sheriff_vote":
+			return { kind: "sheriff_vote", seat: turn.seat, target: "abstain" };
+		case "badge_transfer":
+			return { kind: "badge_transfer", seat: turn.seat, target: null };
 		case "day_speech":
 			return {
 				kind: "day_speech",

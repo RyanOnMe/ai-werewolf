@@ -4,6 +4,7 @@ import { GameEngine } from "../engine/engine.ts";
 import {
 	type Action,
 	type GameEvent,
+	type GameMode,
 	type PlayerPolicy,
 	type PlayerView,
 	type Role,
@@ -19,6 +20,7 @@ import { PiPlayerError } from "../agents/pi-player.ts";
 export interface RunGameOptions {
 	seed: string;
 	gameId?: string;
+	mode?: GameMode;
 	config?: Partial<RulesConfig>;
 	/** 精确的 run 目录；提供后会写 events.ndjson / transcripts / summary.json。 */
 	outDir?: string;
@@ -43,6 +45,7 @@ export interface GameViolations {
 export interface GameRunResult {
 	gameId: string;
 	seed: string;
+	mode: GameMode;
 	winner: Winner | null;
 	endReason: string | null;
 	days: number;
@@ -104,6 +107,7 @@ export async function runGame(options: RunGameOptions): Promise<GameRunResult> {
 	const engine = GameEngine.create({
 		seed: options.seed,
 		gameId,
+		mode: options.mode,
 		config: options.config,
 	});
 	const policies = new Map<number, PlayerPolicy>();
@@ -207,6 +211,7 @@ export async function runGame(options: RunGameOptions): Promise<GameRunResult> {
 		const summary = {
 			gameId,
 			seed: options.seed,
+			mode: engine.state.mode,
 			createdAt: new Date().toISOString(),
 			durationMs,
 			playerCount: engine.state.players.length,
@@ -236,6 +241,7 @@ export async function runGame(options: RunGameOptions): Promise<GameRunResult> {
 	return {
 		gameId,
 		seed: options.seed,
+		mode: engine.state.mode,
 		winner: engine.state.winner,
 		endReason: engine.state.endReason,
 		days: engine.state.day,

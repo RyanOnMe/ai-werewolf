@@ -10,7 +10,7 @@ import {
 	seatLabel,
 } from "../engine/types.ts";
 import { formatEvent, formatSeatList } from "../judge/format.ts";
-import { RULES_TEXT } from "./rules.ts";
+import { rulesTextFor, strategyTextFor } from "./rules.ts";
 
 export interface ToolLimits {
 	maxSpeechChars: number;
@@ -28,7 +28,7 @@ export function createTurnHandle(turn: TurnRequest, view: PlayerView): TurnHandl
 	return { turn, view, action: null, wolfSpeech: [] };
 }
 
-export const INFO_TOOL_NAMES = new Set(["view_state", "view_log", "view_rules"]);
+export const INFO_TOOL_NAMES = new Set(["view_state", "view_log", "view_rules", "view_strategy"]);
 
 interface ToolOutcome {
 	text: string;
@@ -259,6 +259,110 @@ export function buildTurnTools(handle: TurnHandle, limits: ToolLimits): AgentToo
 			);
 			break;
 		}
+		case "sheriff_signup": {
+			tools.push(
+				makeTool(
+					handle,
+					"sheriff_run",
+					"选择是否上警",
+					"决定是否参加第 1 天警长竞选。run=true 上警，会公开发言并可能当选警长；run=false 留在警下投票。警长有 1.5 票放逐票权，死亡时可以移交警徽。",
+					Type.Object({
+						run: Type.Boolean({ description: "true=上警，false=不上警。" }),
+					}),
+					(params) => {
+						return accept(
+							handle,
+							{ kind: "sheriff_signup", seat: turn.seat, run: params.run },
+							params.run ? "已提交：上警。" : "已提交：不上警。",
+						);
+					},
+				),
+			);
+			break;
+		}
+		case "sheriff_speech": {
+			tools.push(
+				makeTool(
+					handle,
+					"sheriff_say",
+					"警长竞选发言",
+					"发表警长竞选发言，所有玩家都会看到。说明上警目的、身份/站边、警徽流和归票计划；不要只说“我上警”。",
+					Type.Object({
+						text: Type.String({
+							minLength: 1,
+							maxLength: limits.maxSpeechChars,
+							description: "竞选发言内容，中文。",
+						}),
+					}),
+					(params) => {
+						const problem = checkText(params.text, limits.maxSpeechChars);
+						if (problem) return reject(problem);
+						return accept(
+							handle,
+							{ kind: "sheriff_speech", seat: turn.seat, text: params.text },
+							"已提交警长竞选发言。",
+						);
+					},
+				),
+			);
+			break;
+		}
+		case "sheriff_vote": {
+			tools.push(
+				makeTool(
+					handle,
+					"sheriff_vote",
+					"警长竞选投票",
+					"投给一名警上候选人，或 abstain 弃票。候选人不能投票。",
+					Type.Object({
+						target: Type.Union([Type.Integer({ minimum: 1 }), Type.Literal("abstain")], {
+							description: "候选人座位号，或 abstain 弃票。",
+						}),
+					}),
+					(params) => {
+						if (params.target !== "abstain" && !isLegalTarget(handle, params.target)) {
+							return reject(`目标 ${params.target} 不是本回合可投的警上候选人。`);
+						}
+						return accept(
+							handle,
+							{ kind: "sheriff_vote", seat: turn.seat, target: params.target },
+							params.target === "abstain"
+								? "已提交：警长票弃票。"
+								: `已提交：警长票投给 ${seatLabel(params.target)}。`,
+						);
+					},
+				),
+			);
+			break;
+		}
+		case "badge_transfer": {
+			tools.push(
+				makeTool(
+					handle,
+					"transfer_badge",
+					"移交警徽",
+					"你已出局且是警长。把警徽交给一名存活玩家，或传 target=null 销毁警徽。优先交给可信的好人；交给狼人会让对方获得 1.5 票和警徽。",
+					Type.Object({
+						target: Type.Union([Type.Integer({ minimum: 1 }), Type.Null()], {
+							description: "接警徽的存活玩家座位号，或 null 销毁。",
+						}),
+					}),
+					(params) => {
+						if (params.target !== null && !isLegalTarget(handle, params.target)) {
+							return reject(`目标 ${params.target} 不是可接警徽的存活玩家。`);
+						}
+						return accept(
+							handle,
+							{ kind: "badge_transfer", seat: turn.seat, target: params.target },
+							params.target === null
+								? "已提交：销毁警徽。"
+								: `已提交：警徽交给 ${seatLabel(params.target)}。`,
+						);
+					},
+				),
+			);
+			break;
+		}
 		case "day_speech": {
 			tools.push(
 				makeTool(
@@ -350,9 +454,17 @@ export function buildTurnTools(handle: TurnHandle, limits: ToolLimits): AgentToo
 			handle,
 			"view_rules",
 			"查看完整规则",
-			"返回 9 人局的完整规则文本。不消耗行动。",
+			"返回本局（9 人或 12 人）的完整规则文本。不消耗行动。",
 			Type.Object({}),
-			() => ({ text: RULES_TEXT }),
+			() => ({ text: rulesTextFor(handle.view.mode) }),
+		),
+		makeTool(
+			handle,
+			"view_strategy",
+			"查看策略手册",
+			"返回本局身份对应的策略手册：胜负计算、角色目标、发言结构、上警/警徽和欺骗技巧。不消耗行动。",
+			Type.Object({}),
+			() => ({ text: strategyTextFor(handle.view.role, handle.view.mode) }),
 		),
 	);
 
@@ -365,10 +477,13 @@ function renderState(handle: TurnHandle): string {
 	lines.push(
 		`[法官] 第 ${view.day} 天 · ${PHASE_LABEL[view.phase]} · 回合 ${view.turn.id}`,
 	);
-	lines.push(
-		`你是 ${seatLabel(view.seat)}，身份：${ROLE_LABEL[view.role]}（${factionOf(view.role) === "wolf" ? "狼人阵营" : "好人阵营"}），${view.alive ? "存活" : "已出局"}。`,
-	);
-	lines.push(`存活：${formatSeatList(view.aliveSeats)}；出局：${formatSeatList(view.deadSeats)}`);
+		lines.push(
+			`你是 ${seatLabel(view.seat)}，身份：${ROLE_LABEL[view.role]}（${factionOf(view.role) === "wolf" ? "狼人阵营" : "好人阵营"}），${view.alive ? "存活" : "已出局"}。`,
+		);
+		lines.push(
+			`本局：${view.playerCount} 人（${view.mode === "12p" ? "有警长竞选" : "无警长"}）；当前警长：${view.sheriff === null ? "无" : seatLabel(view.sheriff)}。`,
+		);
+		lines.push(`存活：${formatSeatList(view.aliveSeats)}；出局：${formatSeatList(view.deadSeats)}`);
 	lines.push("私密信息：");
 	for (const line of view.privateInfo) lines.push(`- ${line}`);
 	lines.push(`本回合要求：${view.turn.promptHint}`);

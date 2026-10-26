@@ -282,13 +282,18 @@ input:disabled {
 
 .new-game-form {
 	display: grid;
-	grid-template-columns: minmax(170px, 1.2fr) minmax(150px, 0.8fr) minmax(180px, 1fr) auto;
+	grid-template-columns:
+		minmax(120px, 0.7fr)
+		minmax(160px, 1.1fr)
+		minmax(150px, 0.8fr)
+		minmax(180px, 1fr)
+		auto;
 	align-items: end;
 	gap: 12px;
 }
 
 .new-game-form.no-model {
-	grid-template-columns: minmax(170px, 1.4fr) minmax(150px, 0.8fr) auto;
+	grid-template-columns: minmax(120px, 0.7fr) minmax(160px, 1.2fr) minmax(150px, 0.8fr) auto;
 }
 
 .new-game-title {
@@ -557,6 +562,50 @@ input:disabled {
 	color: var(--accent-2);
 }
 
+.sheriff-mark {
+	position: absolute;
+	top: -8px;
+	right: -8px;
+	z-index: 4;
+	display: grid;
+	place-items: center;
+	width: 22px;
+	height: 22px;
+	border: 1px solid rgba(255, 232, 167, 0.55);
+	border-radius: 50%;
+	background: linear-gradient(145deg, #f0d58c, #c49a3f);
+	color: #22190a;
+	font-size: 12px;
+	line-height: 1;
+	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+.seat.sheriff .seat-role {
+	color: #f0d58c;
+}
+
+.seat.sheriff:not(.current) .seat-orb {
+	border-color: rgba(240, 213, 140, 0.62);
+	box-shadow:
+		0 0 0 3px rgba(240, 213, 140, 0.08),
+		0 12px 26px rgba(0, 0, 0, 0.34),
+		inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.seat.revealed .seat-status {
+	color: #ffd7a8;
+}
+
+.seats-ring[data-count="12"] .seat {
+	width: 76px;
+}
+
+.seats-ring[data-count="12"] .seat-orb {
+	width: 56px;
+	height: 56px;
+	font-size: 18px;
+}
+
 .seat.dead {
 	opacity: 0.62;
 }
@@ -645,6 +694,16 @@ input:disabled {
 	color: #8fe0c6;
 }
 
+.seat[data-role="idiot"] .seat-orb {
+	border-color: rgba(240, 213, 140, 0.5);
+	background: linear-gradient(145deg, #3a3220, #17130b);
+	color: #ffe7ad;
+}
+
+.seat[data-role="idiot"] .seat-role {
+	color: #f0d58c;
+}
+
 .table-center {
 	position: absolute;
 	left: 50%;
@@ -713,6 +772,21 @@ input:disabled {
 
 .center-winner[data-winner="good"] {
 	color: #8fe0c6;
+}
+
+.center-sheriff {
+	max-width: 100%;
+	margin-top: 2px;
+	color: #e8c878;
+	font-size: 10.5px;
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	text-align: center;
+	overflow-wrap: anywhere;
+}
+
+.center-sheriff:empty {
+	display: none;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1001,6 +1075,29 @@ input:disabled {
 .timeline-event[data-type="game_end"] .event-body {
 	border-color: rgba(217, 180, 91, 0.3);
 	background: rgba(217, 180, 91, 0.07);
+}
+
+.timeline-event[data-type="sheriff_elected"] .event-body,
+.timeline-event[data-type="badge_transfer"] .event-body {
+	border-color: rgba(240, 213, 140, 0.28);
+	background: rgba(240, 213, 140, 0.055);
+}
+
+.timeline-event[data-type="sheriff_elected"] .event-dot,
+.timeline-event[data-type="badge_transfer"] .event-dot {
+	background: #d9b45b;
+	box-shadow: 0 0 0 3px rgba(217, 180, 91, 0.12);
+}
+
+.timeline-event[data-type="sheriff_speech"] .event-body,
+.timeline-event[data-type="sheriff_vote"] .event-body {
+	border-color: rgba(110, 168, 254, 0.18);
+	background: rgba(110, 168, 254, 0.04);
+}
+
+.timeline-event[data-type="idiot_revealed"] .event-body {
+	border-color: rgba(240, 213, 140, 0.34);
+	background: rgba(240, 213, 140, 0.07);
 }
 
 .timeline-event[data-type="game_start"] .event-body {
