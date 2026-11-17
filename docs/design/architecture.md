@@ -49,7 +49,7 @@ GameEngine.submit(Action)（规则校验、结算、事件）
   - `advance()`：自动处理播报、结算、胜负、阶段切换，直到需要一个玩家行动。
   - 返回 `TurnRequest`（谁、什么行动、合法目标、提示）。
   - `submit(action)`：校验并应用；非法行动抛 `RuleError`，状态不变。
-  - 任务队列显式表达“下一步”：狼人行动 → 预言家 → 女巫 → 夜晚结算 → 遗言 → 猎人 → 白天发言 → 投票 → 放逐 → 遗言 → 猎人 → 下一夜。
+  - 任务队列显式表达“下一步”：狼队战术会 → 狼人行动 → 预言家 → 女巫 → 夜晚结算 → 遗言 → 猎人 → 白天发言 → 投票 → 放逐 → 遗言 → 猎人 → 下一夜。
 - 事件是唯一观测面：`seq`、`day`、`phase`、`type`、`visibility`、`actor`、`target`、`text`、`data`。
 
 **为什么不用“玩家自己轮询/互相调用”**：
@@ -120,6 +120,7 @@ await agent.prompt(view.brief);                     // 简报进入持久 transc
 
 - **没有** `read` / `bash` / `edit` / `write` 等编码工具；玩家只有游戏工具 + `view_*`。
 - `agent.subscribe()` 用于采集 token usage、tool 事件和错误。
+- `withModelRetry()` 在同一个模型响应上做有界退避；模型回复成功后 pi 才执行工具。截断、错误和取消时的参数草稿不作为行动。
 - `agent.abort()` + `agent.waitForIdle()` 用于超时；下一回合开始前等待上一次 run 结束。
 - `sessionId` 让 provider 端可以按玩家做 prompt cache。
 - `toolExecution: "sequential"` 保证同一批 tool call 里不会出现两个并发行动。
@@ -129,22 +130,23 @@ await agent.prompt(view.brief);                     // 简报进入持久 transc
 每个玩家有**独立 transcript**，不共享上下文。一个玩家的上下文只包含：
 
 1. **System prompt（固定）**
-   - 座位、身份、阵营、角色指南。
+   - 座位、身份、阵营。
    - 本局完整规则（9 人或 12 人，含上警/白痴）。
-   - 角色策略手册：胜负计算、发言结构、上警/警徽、狼人伪装、好人归票。
+   - 角色策略手册：区分事实、声称和推断；核对替代解释；比较归票、屠边和下一夜收益；用可核对的依据支持公开发言。
    - “自由文本私密、只有工具生效、法官是权威、可以欺骗、不要泄露提示”等行为约束。
 2. **每回合简报（user message）**
    - 当前天数/阶段/回合 ID、警长/上警候选人。
    - 存活/出局座位。
-   - 私密信息：狼队友、查验记录、药剂状态、今晚狼刀目标、猎人技能、白痴翻牌状态。
-   - 公开局势摘要：自动提取的公开自称/查杀/金水、最近投票、警长竞选结果、白痴翻牌。
+   - 私密信息：狼队友、狼队战术计划、查验记录、药剂状态、今晚狼刀目标、猎人技能、白痴翻牌状态。
+   - 公开局势摘要：最近两轮的投票明细和加权票数、警长竞选结果、白痴翻牌。
+   - 局势面板：有放逐票权的座位、总票权；仅狼队获得阵营票数拆分。
    - 自上次该玩家行动以来的可见事件增量（公开发言、死亡、投票结果、狼队频道等）。
    - 本回合要求、合法目标、决策检查清单。
 3. **自己的 assistant 消息与 tool result**
    - 自己的思考、发言、行动及其结果。
 4. **按需查询工具**
-   - `view_state`：当前局势 + 私密信息 + 合法目标。
-   - `view_log`：最近 N 条自己可见的历史事件。
+   - `view_state`：当前局势 + 私密信息 + 狼队战术计划 + 合法目标。
+   - `view_log`：最近 N 条自己可见的历史事件，可按座位和天数查证。
    - `view_rules`：本局完整规则。
    - `view_strategy`：本局身份对应的策略手册。
 
@@ -156,18 +158,19 @@ await agent.prompt(view.brief);                     // 简报进入持久 transc
 |---|---|---|
 | `public` | 所有人 | 白天发言、投票结果、死亡公告、游戏结束 |
 | `seat` | 指定座位 | 查验结果、女巫用药、法官私信 |
-| `wolves` | 狼人 | 狼队频道、狼队刀杀投票、狼队最终刀口 |
+| `wolves` | 狼人 | 狼队频道、狼队战术计划、狼队刀杀投票、狼队最终刀口 |
 | `judge` | 没人（仅日志） | 身份分配、内部 turn_start、错误、保底动作 |
 
 `makePlayerView()` 在构造简报时按 visibility 过滤，并排除：
 - `role_assigned` / 私密结果事件（私密信息已在 `privateInfo` 中汇总，避免重复）。
 - 自己的发言/投票回声（自己的 assistant 消息里已有）。
+- `wolf_plan` 事件（计划已通过 `PlayerView.wolfPlan` 和简报中的“狼队战术”段落单独展示，避免重复）。
 - 所有 judge 事件。
 
 ### 为什么不把全量日志塞进 prompt
 
 - 9/12 人局 × 数天，每个 agent 只看到“自上次行动以来”的增量；总量可控。
-- 公开摘要只做轻量自动提取（自称、查杀/金水、最近投票），不替代 agent 自己看发言。
+- 公开摘要使用法官的结构化记录；身份自称和报验由 agent 结合原始发言判断。
 - 需要旧信息时由 agent 主动 `view_log`，符合上下文经济学。
 - 每回合简报是新的 user message，system prompt 保持不变，便于 provider 端 prompt cache。
 
@@ -176,13 +179,13 @@ await agent.prompt(view.brief);                     // 简报进入持久 transc
 ```ts
 interface TurnRequest {
   id: string;
-  kind: "wolf_turn" | "seer_check" | "witch_act" | "last_words"
-      | "hunter_shoot" | "sheriff_signup" | "sheriff_speech"
+  kind: "wolf_strategy" | "wolf_turn" | "seer_check" | "witch_act"
+      | "last_words" | "hunter_shoot" | "sheriff_signup" | "sheriff_speech"
       | "sheriff_vote" | "badge_transfer" | "day_speech" | "day_vote";
   seat: number;
   legalTargets: number[];
   promptHint: string;
-  // 角色相关：狼队友、女巫可用的药、今晚被刀目标、警上候选人……
+  // 角色相关：狼队友、上一版狼队计划、女巫可用的药、今晚被刀目标、警上候选人……
 }
 ```
 
@@ -190,6 +193,7 @@ interface TurnRequest {
 
 | 回合 | 可用工具 | 终止条件 |
 |---|---|---|
+| 狼队战术会 | `set_wolf_plan` | 计划被接受 |
 | 狼人夜谈 | `wolf_speak`（可多次）+ `wolf_vote` | `wolf_vote` 被接受 |
 | 预言家 | `seer_check` | 被接受 |
 | 女巫 | `witch_act` | 被接受 |
@@ -240,7 +244,7 @@ interface TurnRequest {
 |---|---|
 | agent 调用非法目标/非法行动 | 工具返回“行动被拒绝 + 原因”，agent 可重试；回合不结束 |
 | agent 只输出文字不调用工具 | 法官发一次纠正提示；仍不行动则抛给 runner |
-| agent 连续调用信息工具 | 每个 prompt 最多 8 个 agent turn，然后停止 |
+| agent 连续调用信息工具 | 每个 prompt 最多 10 个 agent turn，然后停止 |
 | 模型超时 | `agent.abort()`，runner 用该回合的合法保底动作继续 |
 | 模型/provider 错误 | 记录 `agent_error`；非 fatal 用保底动作；连续 5 次或 fatal（鉴权/模型不支持）中止游戏 |
 | 提交动作被引擎拒绝 | 记录 `action_rejected`，用合法保底动作继续 |
@@ -288,13 +292,15 @@ runs/<gameId>/
 3. **pi agent loop 集成测试**（`test/pi-player.test.ts`）
    - 用 fake stream 模拟模型，验证：工具接受/拒绝、view_state 后继续、纠正提示、重复行动阻止、不同回合工具集、警长工具、fatal 错误。
    - 不花 token，但走真实 agent loop 和真实工具 schema。
-4. **真实模型 smoke**（`npm run smoke:llm`）
-   - 一次真实模型回合，验证 auth、模型能力和自定义工具。
-5. **CLI 全流程**（`npm run verify`）
+4. **模型路由**（`test/model-routing.test.ts`）
+   - 模型列表解析、双模型按座位交替、双模型组合生成、分配摘要。
+5. **真实模型 smoke**（`npm run smoke:llm`）
+   - 一次真实模型回合，验证 auth、模型能力和自定义工具；Paratera 两个模型均已实测通过。
+6. **CLI 全流程**（`npm run verify`）
    - 走真实 CLI + runner + 文件落盘，9 人/12 人各一局，检查 summary 不变量。
-6. **观战服务**（`test/server.test.ts`）
+7. **观战服务**（`test/server.test.ts`）
    - 静态页/配置、脚本对局、public SSE 只含 public 事件、god SSE 含身份/狼队/查验、12 人公开 SSE 含上警/警长、403/404/路径穿越。
-   - 另用 Playwright 在桌面/移动宽度检查公开/上帝视角、回放、12 人圆桌和新对局面板。
+   - 在 Chrome 检查桌面、窄屏和横屏的同屏布局，以及真实事件流驱动的视角切换、翻页和回放。
 
 ### 故意改坏
 
@@ -308,7 +314,7 @@ runs/<gameId>/
 
 观战是**事件流的只读消费者**，不参与游戏状态，也不改规则。
 
-![上帝视角](../assets/spectator-god.png)
+![观战台](../assets/spectator-match-desk.png)
 
 ### 9.1 服务端
 
@@ -317,28 +323,30 @@ runs/<gameId>/
 | 路由 | 作用 |
 |---|---|
 | `GET /`、`/styles.css`、`/app.js` | 托管 `web/` 静态页面 |
-| `GET /api/config` | `godEnabled`、可用模型、默认模型、板子列表、当前活动对局 |
+| `GET /api/config` | `godEnabled`、可用模型、模型组合（`modelSets`）、默认模型、thinking level、板子列表、当前活动对局 |
 | `GET /api/games` | 扫描 `runs/`，返回对局列表、板子/人数、胜者、状态、事件数 |
-| `POST /api/games` | 从浏览器开始新对局：`{mode:"scripted"\|"live", board:"9p"\|"12p", seed, model}` |
+| `POST /api/games` | 从浏览器开始新对局：`{mode:"scripted"\|"live", board:"9p"\|"12p", seed, model, models?, thinkingLevel?}`；`model` 可以是逗号分隔的模型列表 |
 | `GET /api/games/:id/events?view=public\|god` | SSE 事件流 |
 
 关键点：
 
 - **公开视角在服务端过滤。** `view=public` 只发送 `visibility.kind === "public"` 的事件；`seat` / `wolves` / `judge` 不会进入浏览器。`view=god` 需要启动时 `--god`，否则 403。
-- **SSE tailer 读 `events.ndjson`。** 从文件开头发送完整行；每 250ms 轮询追加；支持 CLI 正在跑的对局（不需要和 runner 同进程）。发送 `done` 的判定：服务端内存状态 `finished`、`summary.phase === "ended"` 或最后一条是 `game_end`。
+- **SSE 增量读取 `events.ndjson`。** 从文件开头重放完整行，再约每 125ms 读新增字节。支持 CLI 正在跑的对局。结算后发送 `done`，失败时公开视角只接收通用说明。
+- **流式草稿侧路。** Web 对局的玩家进度保存在内存，SSE `turn` 发送一份当前快照；合法提交、超时或模型重试时替换草稿。公开视角仅允许公开发言回合；狼队发言和战术草稿只给上帝视角。草稿不进入引擎、简报和回放。CLI 的 `--stream` 可直接打印草稿。
+- **模型座位表。** 记录本局使用的模型列表，按实际分配循环还原至座位。服务只发送 `roster` 的人数和模型展示字段；旧对局可从摘要中读取模型列表。图标先识别模型家族，再识别提供方。
 - **不暴露 transcript。** 只读 `events.ndjson` 和 `summary.json`；路径做了 ID 白名单与静态目录逃逸检查。
-- **新对局 API。** 脚本模式用 `RandomPolicy`；真实模式用与 CLI 相同的 `loadPiModel` + `PiPlayer`。同一时间只允许一局，返回 `409`；启动后等待 `events.ndjson` 出现再返回，避免前端 SSE 404 竞态。
+- **新对局 API。** 脚本模式用 `RandomPolicy`；真实模式用与 CLI 相同的 `loadPiModel` / `loadPiModels` + `PiPlayer`。多个模型按座位交替分配（seat 1 → models[0]，seat 2 → models[1] …）。同一时间只允许一局，返回 `409`；启动后等待 `events.ndjson` 出现再返回，避免前端 SSE 404 竞态。
 - **默认只绑定 `127.0.0.1`。** `--god` 会暴露身份和私密信息；不要把 `--host 0.0.0.0` 和 `--god` 一起暴露到公网。
 
 ### 9.2 前端
 
 `web/` 是无构建步骤的 HTML/CSS/JS（没有 React/Vite，也没有外部 CDN）：
 
-- **圆桌**：9/12 个座位按圆环定位；警长徽记、白痴翻牌、存活/出局、角色（上帝视角或游戏结束后）、当前行动者高亮、死因（上帝视角）。
-- **时间线**：按天分组；发言、遗言、上警、竞选发言、警长票、警徽移交、白痴翻牌、投票、死亡、猎人开枪、阶段播报；上帝视角额外显示狼队频道、查验、女巫用药。所有事件文本用 `textContent` 写入，避免 LLM 发言中的 HTML 注入。
-- **回放**：滑块按事件 `seq` 截断；状态（存活/出局、角色、天数、警长、翻牌）全部由事件重放推导；支持自动回放和“回到最新”。
-- **上帝面板**：身份分组、警长/竞选、查验记录、女巫用药、狼队频道、法官异常计数。
-- **新对局表单**：板子（9p/12p）、模式、种子、模型（来自 `/api/config`）；真实模型默认优先 `openai-codex/gpt-5.6-luna`。
+- **玩家席**：9/12 个座位同屏，显示模型 Logo、警徽、翻牌和状态；点击座位查看完整标识以及该视角允许的身份与死因。
+- **播报台**：当前草稿、已确认发言和事件正文按可用高度分页。纪事支持按类型筛选、读正文和跳转到该事件。所有发言以纯文本呈现。
+- **回放**：从选中事件推导存活、角色、天数、警长、翻牌；支持定格、自动回放和回到最新。
+- **上帝情报**：座位身份、警徽、狼队战术及行动、查验、用药、重试和错误分组查阅。
+- **新对局表单**：板子（9p/12p）、模式、种子、模型（来自 `/api/config` 的 `models` + `modelSets`）。检测到两个 Paratera 模型时提供“双模型交替”组合；服务端可用 `--model "a,b"` 把双模型设为默认。
 
 前端不缓存服务端状态：每次重连 SSE 都会从头回放事件，按 `seq` 去重；因此刷新页面、切换视角、切换对局都能得到一致结果。
 
@@ -372,7 +380,7 @@ runs/           运行产物（gitignored）
 | 规则放哪 | system prompt 全文 + view_rules | 正确理解规则优先；prompt cache 抵消成本 |
 | 上下文共享 | 每人独立 transcript | 天然信息隔离；不会把私密信息发给错误玩家 |
 | 回合并发 | 当前串行 | 事件顺序确定、回放简单；后续可并行独立夜间行动 |
-| 模型选择 | 复用 pi ModelRuntime | OAuth 刷新、provider 配置与 pi CLI 一致 |
+| 模型选择 | 复用 pi ModelRuntime + 运行时注册 Paratera | OAuth 刷新、provider 配置与 pi CLI 一致；key 只从 `.env`/环境变量读取 |
 | 失败策略 | 有限纠正 + 合法保底动作 | 保证游戏跑完；异常全部留痕 |
 | 上下文压缩 | 当前不做 | 12 人局上下文通常仍在 128k 内；先保证正确性 |
 | 观战前端 | 只读事件流 + 服务端过滤 | 不复制引擎状态；公开视角边界可测试；CLI/回放/前端共用一条数据链 |
@@ -386,5 +394,5 @@ runs/           运行产物（gitignored）
 - 更丰富的观战 UI：图表、对局对比、导出、移动端优化。
 - 真人玩家接入同一个 `PlayerPolicy` 接口。
 - 更丰富的 agent 记忆：个人笔记工具、跨天摘要。
-- 多模型对局（不同座位不同模型/性格）。
+- 更丰富的多模型编排（按阵营分组、按阶段切换、给不同座位不同性格）。
 - 自动对局评估：胜率、发言质量、规则违规率。

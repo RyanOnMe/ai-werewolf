@@ -6,6 +6,7 @@ import {
 	type GameEvent,
 	type GameMode,
 	type PlayerPolicy,
+	type PlayerProgress,
 	type PlayerView,
 	type Role,
 	type RulesConfig,
@@ -32,6 +33,8 @@ export interface RunGameOptions {
 	) => PlayerPolicy | Promise<PlayerPolicy>;
 	onEvent?: (event: GameEvent) => void;
 	onTurn?: (turn: TurnRequest, view: PlayerView) => void;
+	onProgress?: (turn: TurnRequest, progress: PlayerProgress) => void;
+	onTurnSettled?: (turn: TurnRequest) => void;
 	maxConsecutiveAgentErrors?: number;
 	metadata?: Record<string, unknown>;
 }
@@ -140,6 +143,15 @@ export async function runGame(options: RunGameOptions): Promise<GameRunResult> {
 		recorder.event(event);
 		options.onEvent?.(event);
 	}
+	const models = options.metadata?.models;
+	const scripted = options.metadata?.mode === "scripted";
+	if (scripted || (Array.isArray(models) && models.length > 0)) {
+		recordJudge("model_roster", "已记录各座位的模型分配", {
+			mode: scripted ? "scripted" : "live",
+			playerCount: engine.state.players.length,
+			models: !scripted && Array.isArray(models) ? models.filter((spec) => typeof spec === "string") : [],
+		});
+	}
 
 	try {
 		for (const player of engine.state.players) {
@@ -157,6 +169,16 @@ export async function runGame(options: RunGameOptions): Promise<GameRunResult> {
 				}
 			},
 			onTurn: options.onTurn,
+			onProgress: (turn, progress) => {
+				if (progress.state === "retrying") {
+					const { attempt, delayMs, reason } = progress.retry;
+					recordJudge("model_retry", `${turn.seat}号将在 ${delayMs}ms 后进行第 ${attempt} 次模型重试`, {
+						seat: turn.seat, turnId: turn.id, kind: turn.kind, attempt, delayMs, reason,
+					});
+				}
+				options.onProgress?.(turn, progress);
+			},
+			onTurnSettled: options.onTurnSettled,
 			onError: async (error, turn, view) => {
 				const message = error instanceof Error ? error.message : String(error);
 				const fatal = error instanceof PiPlayerError && error.fatal;
@@ -225,6 +247,9 @@ export async function runGame(options: RunGameOptions): Promise<GameRunResult> {
 				engine.state.players.filter((p) => p.death).map((p) => [p.seat, p.death]),
 			),
 			eventCount: engine.allEvents.length,
+			wolfPlan: engine.state.wolfPlan,
+			wolfPlanDay: engine.state.wolfPlanDay,
+			wolfPlanAuthor: engine.state.wolfPlanAuthor,
 			violations,
 			usageBySeat,
 			metadata: options.metadata ?? {},

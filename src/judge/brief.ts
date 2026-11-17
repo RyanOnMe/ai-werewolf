@@ -32,11 +32,36 @@ export function buildBrief(view: PlayerView): string {
 	lines.push("—— 私密信息 ——");
 	for (const line of view.privateInfo) lines.push(line);
 
+	if (view.role === "werewolf") {
+		lines.push("");
+		lines.push("—— 狼队战术 ——");
+		if (view.wolfPlan) {
+			lines.push(
+				`当前计划（第 ${view.wolfPlanDay} 夜，${seatLabel(view.wolfPlanAuthor ?? view.seat)}制定）：`,
+			);
+			lines.push(view.wolfPlan);
+		} else {
+			lines.push("当前还没有狼队战术计划。");
+		}
+		lines.push(
+			view.turn.kind === "wolf_strategy"
+				? "本回合你是制定者：先复盘再提交/更新计划，不要把上一版原样复述。"
+				: "计划是团队基线，不是强制命令；如果局势已经变化，先在狼队频道说明，再按你的判断行动。",
+		);
+	}
+
 	const publicSummary = buildPublicSummary(view);
 	if (publicSummary.length > 0) {
 		lines.push("");
 		lines.push("—— 公开局势摘要 ——");
 		for (const line of publicSummary) lines.push(line);
+	}
+
+	const situation = buildSituationSummary(view);
+	if (situation.length > 0) {
+		lines.push("");
+		lines.push("—— 局势面板 ——");
+		for (const line of situation) lines.push(line);
 	}
 
 	lines.push("");
@@ -48,19 +73,30 @@ export function buildBrief(view: PlayerView): string {
 
 	const targets = targetHint(view);
 	if (targets) lines.push(targets);
-	lines.push(`决策检查：${decisionChecklist(view.turn.kind)}`);
-	lines.push("提示：你的自然语言输出只有你自己能看到；只有调用工具才会真正行动。");
+	lines.push(`本轮要权衡：${decisionChecklist(view.turn.kind)}`);
 	return lines.join("\n");
+}
+
+function buildSituationSummary(view: PlayerView): string[] {
+	const lines: string[] = [];
+	const voters = view.players.filter((player) => player.canVote);
+	const weight = (seat: number) => seat === view.sheriff ? view.sheriffVoteWeight : 1;
+	const weighted = voters.reduce((sum, player) => sum + weight(player.seat), 0);
+	lines.push(`当前有放逐票权：${formatSeatList(voters.map((player) => player.seat))}（合计 ${weighted} 票）。`);
+	if (view.role === "werewolf" && view.knownWolfSeats) {
+		const wolves = new Set(view.knownWolfSeats);
+		const wolfWeight = voters.reduce((sum, player) => sum + (wolves.has(player.seat) ? weight(player.seat) : 0), 0);
+		lines.push(`狼队当前占 ${wolfWeight} 票；其余玩家共 ${weighted - wolfWeight} 票（仅狼队可知）。`);
+	}
+	if (view.sheriff !== null && !voters.some((player) => player.seat === view.sheriff)) {
+		lines.push("当前警徽持有者无放逐票权。");
+	}
+	return lines;
 }
 
 function buildPublicSummary(view: PlayerView): string[] {
 	const lines: string[] = [];
 	const publicEvents = view.visibleEvents.filter((event) => event.visibility.kind === "public");
-	const claims = extractClaims(publicEvents);
-	if (claims.length > 0) {
-		lines.push(`公开自称（从发言自动提取，可能是谎言或反话）：${claims.join("；")}。`);
-	}
-
 	const records = publicEvents
 		.filter((event) => event.type === "vote_record")
 		.slice(-2);
@@ -79,7 +115,11 @@ function buildPublicSummary(view: PlayerView): string[] {
 					? `${data.exiled}号（白痴翻牌免死）`
 					: `${data.exiled}号被放逐`
 				: "无人被放逐";
-		lines.push(`第 ${record.day} 天投票：${parts.length > 0 ? parts.join("，") : "无人投票"}；${exiled}。`);
+		const tally = data.tally && typeof data.tally === "object"
+			? Object.entries(data.tally).sort(([, a], [, b]) => Number(b) - Number(a))
+				.map(([seat, weight]) => `${seat}号 ${weight}票`).join("、")
+			: "";
+		lines.push(`第 ${record.day} 天 [E${record.seq}] 放逐票：${parts.length > 0 ? parts.join("，") : "无人投票"}；${tally ? `${tally}；` : ""}${exiled}。`);
 	}
 
 	const election = [...publicEvents].reverse().find((event) => event.type === "sheriff_elected");
@@ -93,41 +133,11 @@ function buildPublicSummary(view: PlayerView): string[] {
 	return lines;
 }
 
-function extractClaims(events: readonly GameEvent[]): string[] {
-	const claimPattern = /(?:我是|我跳|我底牌是|我这张牌是|身份是)\s*(预言家|女巫|猎人|白痴|村民)/g;
-	const checkPattern =
-		/(\d{1,2})\s*号\s*(?:是|为)?\s*(查杀|金水)|(查杀|金水)\s*(\d{1,2})\s*号/g;
-	const claims: string[] = [];
-	const seen = new Set<string>();
-	const add = (text: string) => {
-		if (seen.has(text) || claims.length >= 8) return;
-		seen.add(text);
-		claims.push(text);
-	};
-	const relevant = events
-		.filter(
-			(event) =>
-				event.type === "speech" ||
-				event.type === "sheriff_speech" ||
-				event.type === "last_words",
-		)
-		.slice(-40);
-	for (const event of relevant) {
-		const actor = event.actor === null ? "某位玩家" : seatLabel(event.actor);
-		for (const match of event.text.matchAll(claimPattern)) {
-			add(`${actor}自称${match[1]}`);
-		}
-		for (const match of event.text.matchAll(checkPattern)) {
-			const targetSeat = match[1] ?? match[4];
-			const kind = match[2] ?? match[3];
-			if (targetSeat && kind) add(`${actor}报${targetSeat}号${kind}`);
-		}
-	}
-	return claims;
-}
-
 function targetHint(view: PlayerView): string | null {
 	const { turn } = view;
+	if (turn.kind === "wolf_strategy") {
+		return "本回合不选刀杀目标；只提交/更新战术计划（set_wolf_plan）。";
+	}
 	if (turn.kind === "wolf_turn") {
 		return `可刀杀目标：${formatSeatList(turn.legalTargets)}；也可以 no_kill（空刀）。`;
 	}
@@ -164,27 +174,29 @@ function targetHint(view: PlayerView): string | null {
 
 function decisionChecklist(kind: TurnKind): string {
 	switch (kind) {
+		case "wolf_strategy":
+			return "按已见信息给主刀口、备选和白天分工；指出哪条可观察的新信息会让全队换方案。";
 		case "wolf_turn":
-			return "刀谁最符合屠边/隐藏收益？白天你准备讲什么故事来配合刀口？";
+			return "核对已投的狼队刀票。新刀口是否值得承担分票风险？若要换刀，先对队友说具体原因。";
 		case "seer_check":
-			return "验谁最能验证一个关键站边或悍跳位？下一轮白天准备怎么报？";
+			return "比较两名未验活人：谁的两个可能结果最能改变归票或站边？";
 		case "witch_act":
-			return "这一救/一毒会让哪边更接近胜利？有没有可能是自刀或骗药？";
+			return "比较救、毒、留药各自留下的票和最薄的一边，刀口身份未知。";
 		case "sheriff_signup":
 			return "上警能拿到什么、会暴露什么？你的阵营更需要警徽还是更需要隐藏？";
 		case "sheriff_speech":
-			return "你的身份/站边、警徽流和今天归票是什么？狼人要把假故事编完整。";
+			return "给出拿到警徽后会做的事；有已发言对手就回应一个分歧，否则留给后置位一个具体问题。";
 		case "sheriff_vote":
 			return "哪个候选人更可信、更能带队？你的票会不会把警徽送给狼？";
 		case "badge_transfer":
-			return "谁最可信？给错人等于把 1.5 票送给对方；没有可信目标就销毁。";
+			return "哪个候选人能替你的阵营投出关键票？核对存活、票权和你已公开的承诺。";
 		case "hunter_shoot":
 			return "带走谁收益最大、误伤好人/神职的代价最小？";
 		case "last_words":
-			return "把关键查验、狼坑和下一轮安排交代清楚；不要浪费遗言。";
+			return "交代下一位归票者最需要的一条信息，以及可验证它的方法。";
 		case "day_speech":
-			return "这轮你至少要给一个具体站边/怀疑/归票，并解释理由；不要空过。";
+			return "用一条具体证据推进归票；缺线索时，点名提问并说明哪种回答会改变你的判断。";
 		case "day_vote":
-			return "这一票如何推动你的阵营获胜？和你刚说过的话是否一致？";
+			return "结合公开归票和有票座位，比较两位可行目标；实际票未公布，别假设已有人投票。";
 	}
 }

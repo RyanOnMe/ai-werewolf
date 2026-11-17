@@ -1,9 +1,10 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
 import { extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AddressInfo } from "node:net";
-import type { GameEvent, GameMode as BoardMode, Role, Winner } from "../engine/types.ts";
+import { StringDecoder } from "node:string_decoder";
+import { isPublicSpeechTurn, type GameEvent, type GameMode as BoardMode, type PlayerProgress, type Role, type TurnKind, type Winner } from "../engine/types.ts";
 import type { GameEngine } from "../engine/engine.ts";
 import { runGame } from "../judge/runner.ts";
 import { RandomPolicy } from "../agents/scripted.ts";
@@ -11,8 +12,18 @@ import { PiPlayer } from "../agents/pi-player.ts";
 import {
 	describeAvailableModels,
 	loadPiModel,
+	loadPiModels,
 	type LoadedModel,
 } from "../agents/model.ts";
+import {
+	assignmentSummary,
+	buildModelSets,
+	COMMANDCODE_SPECS,
+	shortModelName,
+	splitModelSpecs,
+} from "../agents/model-routing.ts";
+import { buildModelRoster, savedModelSpecs } from "./model-roster.ts";
+import type { StreamFn } from "@earendil-works/pi-agent-core";
 
 const CONTENT_TYPES: Record<string, string> = {
 	".html": "text/html; charset=utf-8",
@@ -38,6 +49,21 @@ const STALE_RUN_MS = 15 * 60 * 1000;
 type RunMode = "scripted" | "live";
 type ViewMode = "public" | "god";
 type GameState = "running" | "finished" | "error";
+type LiveModel = Omit<LoadedModel, "runtime"> & { stream: StreamFn };
+type LiveTurn = {
+	id: string;
+	seat: number;
+	kind: TurnKind;
+	day: number;
+	phase: GameEvent["phase"];
+	visibility: "public" | "wolves" | "judge";
+	progress: PlayerProgress;
+};
+interface ActiveGame {
+	gameId: string;
+	playerCount: number;
+	turn: LiveTurn | null;
+}
 
 export interface SpectatorServerOptions {
 	/** 对局目录，默认 runs/ */
@@ -58,6 +84,8 @@ export interface SpectatorServerOptions {
 	maxTokens?: number;
 	/** 测试注入：跳过 pi 鉴权探测 */
 	models?: string[];
+	/** 可替换模型加载过程，例如在测试中用模型流替身。 */
+	loadModels?: (specs: string[], thinking: string) => Promise<LiveModel[]>;
 	logger?: (message: string) => void;
 }
 
@@ -130,7 +158,8 @@ function messageOf(error: unknown): string {
  * - GET  /api/games/:id/events?view=public|god   SSE
  * - GET  /api/health
  *
- * 事件只从 runs/<id>/events.ndjson 读取；不暴露 transcript 或 judge 之外的任何文件。
+ * 权威事件来自 events.ndjson；草稿只存在于当前 Web 对局内存。
+ * 观众只会收到按视角筛选的事件和必要的展示数据。
  */
 export class SpectatorServer {
 	private readonly server: Server;
@@ -146,13 +175,14 @@ export class SpectatorServer {
 	private readonly timeoutMs: number;
 	private readonly maxTokens: number;
 	private readonly modelsOverride?: string[];
+	private readonly modelLoader?: SpectatorServerOptions["loadModels"];
 	private readonly logger: (message: string) => void;
 	private readonly clients = new Set<ServerResponse>();
 	private readonly statuses = new Map<string, { state: GameState; message?: string }>();
-	private active: { gameId: string; mode: RunMode; startedAt: number } | null = null;
+	private active: ActiveGame | null = null;
 	private starting = false;
 	private modelsPromise: Promise<string[]> | null = null;
-	private modelCache: LoadedModel | null = null;
+	private modelCache: LiveModel[] | null = null;
 	private modelCacheKey: string | null = null;
 
 	constructor(options: SpectatorServerOptions = {}) {
@@ -171,6 +201,7 @@ export class SpectatorServer {
 		this.timeoutMs = options.timeoutMs ?? 240_000;
 		this.maxTokens = options.maxTokens ?? 2000;
 		this.modelsOverride = options.models;
+		this.modelLoader = options.loadModels;
 		this.logger = options.logger ?? ((message) => console.log(`[spectator] ${message}`));
 		this.server = createServer((req, res) => {
 			void this.handle(req, res);
@@ -251,7 +282,10 @@ export class SpectatorServer {
 			this.sendJson(res, 200, {
 				godEnabled: this.godEnabled,
 				models,
+				modelSets: buildModelSets(models),
+				modelLabels: Object.fromEntries(models.map((model) => [model, shortModelName(model)])),
 				defaultModel: this.pickDefaultModel(models),
+				thinkingLevel: this.thinkingLevel,
 				boards: ["9p", "12p"],
 				defaultBoard: this.defaultBoard,
 				activeGameId: this.active?.gameId ?? null,
@@ -282,7 +316,7 @@ export class SpectatorServer {
 			if (view === "god" && !this.godEnabled) {
 				throw new HttpError(403, "god view is disabled; start the server with --god");
 			}
-			this.streamEvents(req, res, gameId, view);
+			this.streamEvents(res, gameId, view);
 			return;
 		}
 
@@ -305,19 +339,32 @@ export class SpectatorServer {
 	}
 
 	private pickDefaultModel(models: string[]): string | null {
-		if (this.defaultModelSpec && models.includes(this.defaultModelSpec)) {
-			return this.defaultModelSpec;
-		}
+		const requested = splitModelSpecs(this.defaultModelSpec).filter((spec) =>
+			models.includes(spec),
+		);
+		if (requested.length > 0) return requested.join(",");
+		if (models.includes(COMMANDCODE_SPECS[0])) return COMMANDCODE_SPECS[0];
+		const sets = buildModelSets(models);
+		if (sets.length > 0) return sets[0]!.id;
 		for (const preferred of ["openai-codex/gpt-5.6-luna", "openai-codex/gpt-5.6-terra"]) {
 			if (models.includes(preferred)) return preferred;
 		}
 		return models[0] ?? null;
 	}
 
-	private async getLoadedModel(spec: string | undefined, thinking: string): Promise<LoadedModel> {
-		const key = `${spec ?? ""}|${thinking}`;
+	private async getLoadedModels(specs: string[], thinking: string): Promise<LiveModel[]> {
+		const normalized = splitModelSpecs(specs);
+		if (normalized.length === 0) throw new Error("没有指定模型");
+		const key = `${normalized.join(",")}|${thinking}`;
 		if (this.modelCache && this.modelCacheKey === key) return this.modelCache;
-		const loaded = await loadPiModel({ model: spec, thinkingLevel: thinking });
+		const load = async () => {
+			const models = normalized.length > 1
+				? (await loadPiModels({ models: normalized, thinkingLevel: thinking })).models
+				: [await loadPiModel({ model: normalized[0], thinkingLevel: thinking })];
+			return models.map(({ runtime, ...info }) => ({ ...info, stream: runtime.streamSimple.bind(runtime) }));
+		};
+		const loaded = this.modelLoader ? await this.modelLoader(normalized, thinking) : await load();
+		if (loaded.length === 0) throw new Error("没有可用模型");
 		this.modelCache = loaded;
 		this.modelCacheKey = key;
 		return loaded;
@@ -341,7 +388,9 @@ export class SpectatorServer {
 			typeof body.seed === "string" && body.seed.trim().length > 0
 				? body.seed.trim().slice(0, 80)
 				: Date.now().toString(36);
-		const requestedModel = typeof body.model === "string" ? body.model : undefined;
+		const requestedModels = splitModelSpecs(
+			Array.isArray(body.models) ? body.models : body.model,
+		);
 		const thinking =
 			typeof body.thinkingLevel === "string" ? body.thinkingLevel : this.thinkingLevel;
 		const maxDays =
@@ -351,18 +400,21 @@ export class SpectatorServer {
 
 		this.starting = true;
 		try {
-			let loaded: LoadedModel | null = null;
+			let loaded: LiveModel[] | null = null;
 			if (mode === "live") {
 				const models = await this.getModels();
 				if (models.length === 0) {
 					throw new HttpError(
 						400,
-						"没有可用模型。请先运行 `pi auth` 登录，或在启动 serve 时用 --model 指定。",
+						"没有可用模型。请先运行 `pi auth` 登录，或在 .env 中配置 PARATERA_API_KEY。",
 					);
 				}
-				const spec = requestedModel ?? this.pickDefaultModel(models) ?? undefined;
+				const specs =
+					requestedModels.length > 0
+						? requestedModels
+						: splitModelSpecs(this.pickDefaultModel(models));
 				try {
-					loaded = await this.getLoadedModel(spec, thinking);
+					loaded = await this.getLoadedModels(specs, thinking);
 				} catch (error) {
 					throw new HttpError(400, `模型加载失败：${messageOf(error)}`);
 				}
@@ -374,19 +426,23 @@ export class SpectatorServer {
 				gameId = `web-${board}-${sanitize(seed)}-${Date.now().toString(36)}-${suffix++}`;
 			}
 			const outDir = join(this.runsDir, gameId);
-			this.active = { gameId, mode, startedAt: Date.now() };
+			const modelSpecs = loaded?.map((item) => `${item.provider}/${item.modelId}`) ?? [];
+			const playerCount = board === "12p" ? 12 : 9;
+			const active: ActiveGame = { gameId, playerCount, turn: null };
+			this.active = active;
 			this.statuses.set(gameId, { state: "running" });
 
 			const policyFactory = (seat: number, role: Role, engine: GameEngine) => {
 				if (mode === "scripted") return new RandomPolicy(seat, seed);
-				const modelInfo = loaded;
+				if (!loaded || loaded.length === 0) throw new Error("模型未初始化");
+				const modelInfo = loaded[(seat - 1) % loaded.length];
 				if (!modelInfo) throw new Error("模型未初始化");
 				return new PiPlayer({
 					seat,
 					role,
 					mode: engine.state.mode,
 					model: modelInfo.model,
-					baseStreamFn: modelInfo.runtime.streamSimple.bind(modelInfo.runtime),
+					baseStreamFn: modelInfo.stream,
 					sessionId: `${gameId}-seat-${seat}`,
 					thinkingLevel: modelInfo.thinkingLevel,
 					maxTokens: this.maxTokens,
@@ -405,12 +461,30 @@ export class SpectatorServer {
 				timeoutMs: this.timeoutMs,
 				policyFactory,
 				config: { maxDays },
+				onTurn: (turn) => {
+					if (mode !== "live") return;
+					active.turn = {
+						id: turn.id, seat: turn.seat, kind: turn.kind, day: turn.day, phase: turn.phase,
+						visibility: isPublicSpeechTurn(turn.kind) ? "public"
+							: turn.kind === "wolf_turn" || turn.kind === "wolf_strategy" ? "wolves" : "judge",
+						progress: { state: "waiting" },
+					};
+				},
+				onProgress: (turn, progress) => {
+					if (active.turn?.id === turn.id) active.turn = { ...active.turn, progress };
+				},
+				onTurnSettled: (turn) => {
+					if (active.turn?.id === turn.id) active.turn = null;
+				},
 				metadata: {
 					mode,
 					board,
 					source: "web",
-					model: loaded ? `${loaded.provider}/${loaded.modelId}` : null,
-					thinkingLevel: loaded?.thinkingLevel ?? null,
+					model: modelSpecs.join(",") || null,
+					models: modelSpecs,
+					thinkingLevel: loaded?.[0]?.thinkingLevel ?? null,
+					modelAssignments:
+						modelSpecs.length > 1 ? assignmentSummary(modelSpecs, playerCount) : null,
 				},
 			})
 				.then((result) => {
@@ -425,7 +499,11 @@ export class SpectatorServer {
 					this.logger(`对局 ${gameId} 出错：${message}`);
 				});
 
-			this.logger(`启动对局 ${gameId}（${mode} / ${board}${loaded ? ` / ${loaded.provider}/${loaded.modelId}` : ""}）`);
+			const modelText = modelSpecs.join(" + ");
+			this.logger(
+				`启动对局 ${gameId}（${mode} / ${board}${modelText ? ` / ${modelText}` : ""}）`,
+			);
+			if (modelSpecs.length > 1) this.logger(`座位分配：${assignmentSummary(modelSpecs, playerCount)}`);
 			// 让前端拿到 gameId 后立刻连 SSE 时，events.ndjson 已经存在。
 			await waitForFile(join(outDir, "events.ndjson"), 1000);
 			return { gameId };
@@ -442,11 +520,12 @@ export class SpectatorServer {
 			if (!existsSync(eventsPath)) continue;
 			const summary = this.readSummary(entry.name);
 			const stat = statSync(eventsPath);
+			const active = this.active?.gameId === entry.name ? this.active : null;
 			const memory = this.statuses.get(entry.name);
 			let status: GameState =
 				memory?.state ??
 				(summary?.aborted ? "error" : summary?.phase === "ended" ? "finished" : "running");
-			let error = summary?.aborted ? (summary.error ?? "游戏中止") : null;
+			let error = status === "error" ? "对局中止" : null;
 			if (status === "running" && !summary && Date.now() - stat.mtimeMs > STALE_RUN_MS) {
 				status = "error";
 				error = "对局未完成（可能已中断）";
@@ -454,8 +533,8 @@ export class SpectatorServer {
 			items.push({
 				gameId: entry.name,
 				seed: summary?.seed ?? null,
-				playerCount: summary?.playerCount ?? null,
-				board: summary?.mode ?? null,
+				playerCount: summary?.playerCount ?? active?.playerCount ?? null,
+				board: summary?.mode ?? (active ? (active.playerCount === 12 ? "12p" : "9p") : null),
 				winner: summary?.winner ?? null,
 				days: summary?.days ?? null,
 				eventCount: summary?.eventCount ?? this.countLines(eventsPath),
@@ -473,6 +552,7 @@ export class SpectatorServer {
 		const path = join(this.runsDir, gameId, "summary.json");
 		if (!existsSync(path)) return null;
 		try {
+			if (realpathSync(path) !== join(realpathSync(this.runsDir), gameId, "summary.json")) return null;
 			return JSON.parse(readFileSync(path, "utf8")) as RunSummary;
 		} catch {
 			return null;
@@ -493,11 +573,12 @@ export class SpectatorServer {
 		if (!/^[A-Za-z0-9._-]+$/.test(gameId) || gameId.startsWith(".")) {
 			throw new HttpError(400, "invalid game id");
 		}
-		const dir = join(this.runsDir, gameId);
-		if (!existsSync(dir) || !statSync(dir).isDirectory()) {
+		const dir = join(realpathSync(this.runsDir), gameId);
+		if (!existsSync(dir) || realpathSync(dir) !== dir || !statSync(dir).isDirectory()) {
 			throw new HttpError(404, "game not found");
 		}
-		if (!existsSync(join(dir, "events.ndjson"))) {
+		const events = join(dir, "events.ndjson");
+		if (!existsSync(events) || realpathSync(events) !== events || !statSync(events).isFile()) {
 			throw new HttpError(404, "game has no events");
 		}
 		return dir;
@@ -508,16 +589,20 @@ export class SpectatorServer {
 	// -------------------------------------------------------------------
 
 	private streamEvents(
-		req: IncomingMessage,
 		res: ServerResponse,
 		gameId: string,
 		view: ViewMode,
 	): void {
 		const dir = this.gameDir(gameId);
 		const eventsPath = join(dir, "events.ndjson");
-		let sentLines = 0;
+		let readOffset = 0;
+		let rest = "";
+		let ended = false;
+		const decoder = new StringDecoder("utf8");
 		let closed = false;
 		let done = false;
+		let rosterSent = false;
+		let sentTurn: LiveTurn | null = null;
 		let pollTimer: NodeJS.Timeout | null = null;
 		let heartbeat: NodeJS.Timeout | null = null;
 
@@ -543,19 +628,44 @@ export class SpectatorServer {
 		};
 
 		const fail = (message: string): void => {
-			send("server_error", { gameId, message });
-			finish("error", message);
+			const safeMessage = view === "god" ? message : "对局中止，无法继续播放。";
+			send("server_error", { gameId, message: safeMessage });
+			finish("error", safeMessage);
+		};
+
+		const sendRoster = (rawCount?: number, mode?: unknown, metadata?: Record<string, unknown>): void => {
+			if (rosterSent || (rawCount !== 9 && rawCount !== 12)) return;
+			const specs = savedModelSpecs(metadata);
+			if (specs.length === 0 && mode !== "scripted") return;
+			send("roster", {
+				gameId,
+				mode: mode === "scripted" ? "scripted" : "live",
+				players: buildModelRoster(specs, rawCount),
+			});
+			rosterSent = true;
 		};
 
 		const tick = (): void => {
 			if (closed || done) return;
 			try {
-				if (existsSync(eventsPath)) {
-					const raw = readFileSync(eventsPath, "utf8");
-					const complete = raw.split("\n").slice(0, -1);
-					for (let index = sentLines; index < complete.length; index++) {
-						const line = complete[index]!;
-						sentLines = index + 1;
+				const stat = statSync(eventsPath);
+				if (stat.size < readOffset) throw new Error("事件日志已被截短");
+				if (stat.size > readOffset) {
+					const fd = openSync(eventsPath, "r");
+					try {
+						const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, stat.size - readOffset));
+						while (readOffset < stat.size) {
+							const size = readSync(fd, buffer, 0, Math.min(buffer.length, stat.size - readOffset), readOffset);
+							if (size === 0) break;
+							readOffset += size;
+							rest += decoder.write(buffer.subarray(0, size));
+						}
+					} finally {
+						closeSync(fd);
+					}
+					const complete = rest.split("\n");
+					rest = complete.pop() ?? "";
+					for (const line of complete) {
 						if (!line.trim()) continue;
 						let event: GameEvent;
 						try {
@@ -563,7 +673,12 @@ export class SpectatorServer {
 						} catch {
 							continue;
 						}
-						if (view === "public" && event.visibility.kind !== "public") continue;
+						if (event.type === "game_end") ended = true;
+						if (event.type === "model_roster") {
+							const data = event.data;
+							sendRoster(Number(data?.playerCount), data?.mode, data);
+						}
+						if (view === "public" && event.visibility?.kind !== "public") continue;
 						send("game", event);
 					}
 				}
@@ -572,13 +687,15 @@ export class SpectatorServer {
 					fail(status.message ?? "游戏出错");
 					return;
 				}
-				const summary = this.readSummary(gameId);
+				const active = this.active?.gameId === gameId ? this.active : null;
+				const summary = active ? null : this.readSummary(gameId);
+				// 兼容没有独立模型事件的旧回放。
+				sendRoster(summary?.playerCount, summary?.metadata?.mode, summary?.metadata);
 				if (summary?.aborted) {
 					fail(summary.error ?? "游戏中止");
 					return;
 				}
-				if (!status && !summary && !this.active) {
-					const stat = statSync(eventsPath);
+				if (!status && !summary && !active) {
 					if (Date.now() - stat.mtimeMs > STALE_RUN_MS) {
 						fail("对局未完成（可能已中断）");
 						return;
@@ -587,16 +704,23 @@ export class SpectatorServer {
 				if (
 					status?.state === "finished" ||
 					summary?.phase === "ended" ||
-					this.lastLineIsGameEnd(eventsPath)
+					ended
 				) {
 					finish("finished");
 					return;
+				}
+				// 观战草稿不是结算事件，只发送最新快照。不落盘、不参与回放。
+				const turn = active?.turn ?? null;
+				const allowed = turn && (view === "god" || turn.visibility === "public") ? turn : null;
+				if (allowed !== sentTurn) {
+					send("turn", { gameId, turn: allowed });
+					sentTurn = allowed;
 				}
 			} catch (error) {
 				fail(`读取事件失败：${messageOf(error)}`);
 				return;
 			}
-			pollTimer = setTimeout(tick, 250);
+			pollTimer = setTimeout(tick, 125);
 		};
 
 		res.on("close", () => {
@@ -610,20 +734,6 @@ export class SpectatorServer {
 			if (!closed && !res.writableEnded) res.write(": ping\n\n");
 		}, 15_000);
 		tick();
-	}
-
-	private lastLineIsGameEnd(eventsPath: string): boolean {
-		if (!existsSync(eventsPath)) return false;
-		try {
-			const raw = readFileSync(eventsPath, "utf8");
-			const lines = raw.split("\n").filter((line) => line.trim().length > 0);
-			const last = lines.at(-1);
-			if (!last) return false;
-			const event = JSON.parse(last) as GameEvent;
-			return event.type === "game_end";
-		} catch {
-			return false;
-		}
 	}
 
 	// -------------------------------------------------------------------
@@ -641,11 +751,12 @@ export class SpectatorServer {
 			throw new HttpError(400, "bad path");
 		}
 		if (decoded === "/") decoded = "/index.html";
-		const file = resolve(this.staticDir, `.${decoded}`);
-		if (!file.startsWith(this.staticDir + sep)) {
+		const staticRoot = realpathSync(this.staticDir);
+		const file = resolve(staticRoot, `.${decoded}`);
+		if (!file.startsWith(staticRoot + sep)) {
 			throw new HttpError(404, "not found");
 		}
-		if (!existsSync(file) || !statSync(file).isFile()) {
+		if (!existsSync(file) || !realpathSync(file).startsWith(staticRoot + sep) || !statSync(file).isFile()) {
 			throw new HttpError(404, "not found");
 		}
 		const body = readFileSync(file);

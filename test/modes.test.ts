@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { GameEngine } from "../src/engine/engine.ts";
+import { GameEngine, makePlayerView } from "../src/engine/engine.ts";
+import { buildBrief } from "../src/judge/brief.ts";
 import {
 	type Action,
 	type Role,
@@ -54,6 +55,12 @@ function playUntil(
 
 function baseAction(turn: TurnRequest, engine: GameEngine): Action {
 	switch (turn.kind) {
+		case "wolf_strategy":
+			return {
+				kind: "wolf_strategy",
+				seat: turn.seat,
+				plan: "首夜计划：优先刀关键好人，白天分散站边。",
+			};
 		case "wolf_turn":
 			return { kind: "wolf_turn", seat: turn.seat, speech: "", vote: "no_kill" };
 		case "seer_check":
@@ -103,7 +110,7 @@ test("12 人局：4狼4民4神，白痴计入神职，身份不进入公共视�
 		false,
 	);
 	const first = engine.advance();
-	assert.equal(first.turn?.kind, "wolf_turn");
+	assert.equal(first.turn?.kind, "wolf_strategy");
 	assert.equal(first.turn?.seat, 5);
 });
 
@@ -172,6 +179,16 @@ test("12 人局：警长票权 1.5 计入放逐票，被放逐者留遗言", () 
 				return { kind: "sheriff_vote", seat: t.seat, target: 1 };
 			}
 			if (t.kind === "day_vote") {
+				if (t.seat === 1 || t.seat === 5) {
+					const view = makePlayerView(e.state, e.allEvents, t, t.seat, 0, e.config.sheriffVoteWeight);
+					const brief = buildBrief(view);
+					assert.match(brief, /合计 12\.5 票/);
+					if (t.seat === 5) assert.match(brief, /狼队当前占 4 票；其余玩家共 8\.5 票/);
+					else {
+						assert.equal(view.knownWolfSeats, undefined);
+						assert.doesNotMatch(brief, /狼队当前占/);
+					}
+				}
 				return {
 					kind: "day_vote",
 					seat: t.seat,

@@ -47,6 +47,9 @@ export const ROLE_LABEL: Record<Role, string> = {
 	idiot: "白痴",
 };
 
+/** 狼队战术计划的最大长度（比公开发言略长，允许写分支）。 */
+export const MAX_WOLF_PLAN_CHARS = 1200;
+
 export type DeathCause = "wolf_kill" | "poison" | "exile" | "hunter_shot";
 
 export interface DeathRecord {
@@ -96,6 +99,10 @@ export interface GameState {
 	sheriff: number | null;
 	sheriffElectionHeld: boolean;
 	sheriffCandidates: number[];
+	/** 狼队当前战术计划；只对狼人可见。 */
+	wolfPlan: string | null;
+	wolfPlanDay: number | null;
+	wolfPlanAuthor: number | null;
 	winner: Winner | null;
 	endReason: string | null;
 }
@@ -109,12 +116,14 @@ export type Visibility =
 export type EventType =
 	| "game_start"
 	| "role_assigned"
+	| "model_roster"
 	| "phase"
 	| "speech"
 	| "last_words"
 	| "wolf_speech"
 	| "wolf_vote"
 	| "wolf_target"
+	| "wolf_plan"
 	| "seer_result"
 	| "witch_info"
 	| "witch_action"
@@ -131,6 +140,7 @@ export type EventType =
 	| "game_end"
 	| "action_rejected"
 	| "agent_error"
+	| "model_retry"
 	| "default_action"
 	| "turn_start";
 
@@ -149,6 +159,7 @@ export interface GameEvent {
 }
 
 export type TurnKind =
+	| "wolf_strategy"
 	| "wolf_turn"
 	| "seer_check"
 	| "witch_act"
@@ -160,6 +171,25 @@ export type TurnKind =
 	| "badge_transfer"
 	| "day_speech"
 	| "day_vote";
+
+export type PublicSpeechTurn = Extract<TurnKind, "day_speech" | "sheriff_speech" | "last_words">;
+
+export function isPublicSpeechTurn(kind: TurnKind): kind is PublicSpeechTurn {
+	return kind === "day_speech" || kind === "sheriff_speech" || kind === "last_words";
+}
+
+export interface ModelRetry {
+	/** 第几次重试，从 1 开始（不含初始请求）。 */
+	attempt: number;
+	delayMs: number;
+	reason: "rate_limit" | "timeout" | "upstream" | "connection";
+}
+
+/** 玩家可选的实时进度，只是旁观信息，不能作为行动。 */
+export type PlayerProgress =
+	| { state: "waiting" }
+	| { state: "streaming"; text: string }
+	| { state: "retrying"; retry: ModelRetry };
 
 export interface TurnRequest {
 	id: string;
@@ -179,9 +209,14 @@ export interface TurnRequest {
 	/** 警长竞选相关：候选人列表 / 当前玩家是否是警长。 */
 	sheriffCandidates?: number[];
 	isSheriff?: boolean;
+	/** 狼队战术回合：上一版计划及其制定信息。 */
+	previousWolfPlan?: string | null;
+	previousWolfPlanDay?: number | null;
+	previousWolfPlanAuthor?: number | null;
 }
 
 export type Action =
+	| { kind: "wolf_strategy"; seat: number; plan: string }
 	| { kind: "wolf_turn"; seat: number; speech: string; vote: number | "no_kill" }
 	| { kind: "seer_check"; seat: number; target: number }
 	| { kind: "witch_act"; seat: number; save: boolean; poisonTarget: number | null }
@@ -260,6 +295,12 @@ export interface PlayerView {
 	sheriff: number | null;
 	sheriffCandidates: number[];
 	sheriffVoteWeight: number;
+	/** 狼队战术计划；非狼人恒为 null。 */
+	wolfPlan: string | null;
+	wolfPlanDay: number | null;
+	wolfPlanAuthor: number | null;
+	/** 已知的狼队座位，包含自己；其他阵营不提供。 */
+	knownWolfSeats?: readonly number[];
 	legalTargets: number[];
 	privateInfo: string[];
 	/** 自上次该玩家行动以来，新增的可见事件（已排除自己的行动回声）。 */
@@ -272,7 +313,7 @@ export interface PlayerView {
 
 export interface PlayerPolicy {
 	readonly seat: number;
-	decide(turn: TurnRequest, view: PlayerView): Promise<Action>;
+	decide(turn: TurnRequest, view: PlayerView, onProgress?: (progress: PlayerProgress) => void): Promise<Action>;
 	abort?(): void;
 	transcript?(): unknown[];
 	usage?(): { input: number; output: number; total: number };

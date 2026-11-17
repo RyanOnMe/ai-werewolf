@@ -7,11 +7,12 @@
 起点：`node src/cli/play.ts`（或 `runGame()`）。
 终点：`summary.json` 中 `winner` 非空、`phase === "ended"`、`events.ndjson` 最后一条是 `game_end`。
 
-另外四条辅助路径：
+另外几条辅助路径：
 
 - **pi agent loop**：`test/pi-player.test.ts` 用 fake stream 驱动真实 `Agent` + 真实工具 schema，验证“模型调用工具 → 工具校验 → Action → 终止”，含警长工具。
 - **12 人规则**：`test/modes.test.ts` 覆盖上警、1.5 票、警徽移交、白痴翻牌、夜间无遗言。
-- **真实模型**：`npm run smoke:llm`，一次真实模型回合，验证 auth、provider、工具调用。
+- **真实模型**：`npm run smoke:llm`，一次真实模型回合，验证 auth、provider、工具调用。Paratera 的 DeepSeek-V4.1-Flash-1017 / MiniMax-M3.1-Flash 已用 high thinking 实测通过。
+- **模型路由**：`test/model-routing.test.ts` 覆盖模型列表解析、双模型按座位交替、双模型组合生成；服务端 `/api/config` 暴露 `modelSets`，前端默认选中双模型组合。
 - **观战前端**：`npm run serve` → 页面加载 → `/api/games` → SSE `events?view=public`；`--god` 时验证上帝视角包含身份/狼队/查验事件。`test/server.test.ts` 覆盖静态页、配置、9/12 人脚本对局、SSE 过滤、403/404/路径穿越。真实模型从浏览器启动也做过一次手工验证（`runs/web-web-live-demo-*`）。
 
 ## 六槽位
@@ -19,7 +20,7 @@
 ### 1. 触发（执行器）
 
 ```bash
-npm run verify                                  # 一键：typecheck + 34 个测试 + 9/12 人 scripted CLI 对局
+npm run verify                                  # 一键：typecheck + 自动化测试 + 9/12 人 scripted CLI 对局
 npm run play -- --scripted --seed verify-1      # 单局 9 人，无 LLM
 npm run play -- --mode 12p --scripted --seed verify-12 # 单局 12 人，无 LLM
 npm run play -- --model <model> --seed live-1   # 单局，真实模型
@@ -70,10 +71,13 @@ npm run serve -- --god --board 12p              # 新对局默认 12 人
   - 只输出文字 → 收到纠正提示；仍不行动 → `PiPlayerError`。
   - 重复行动被 `beforeToolCall` 阻止。
   - 不同回合只暴露合法工具；`sheriff_run` / `sheriff_say` / `sheriff_vote` / `transfer_badge` 能组装对应 Action；fatal 模型错误被标记。
+  - 已完成工具不因断流重跑，失败草稿不会执行。
+- `test/model-stream.test.ts`：退避次数和等待区间、超时取消、永久错误不重试。
 - `test/server.test.ts`
   - 静态页/配置可用；9/12 人脚本对局能通过 `POST /api/games` 启动并结束。
   - public SSE 只含 `public` 事件，不含 `role_assigned`；god SSE 含身份、狼队、查验事件。
   - 12 人 public SSE 含上警/竞选/警长事件。
+  - 公开草稿早于确认发言；上帝才能看到狼队草稿和重试记录；旧日志可还原模型，回放不发草稿。
   - 非 `--god` 服务对 god 请求返回 403；不存在/路径穿越返回 404/400。
 - CLI 对局（`scripts/verify.sh`）
   - 9 人与 12 人各一局；`summary.json` 胜者非空、规则拒绝为 0、事件数达标、12 人恰好一次警长竞选、夜间死者无遗言。
@@ -82,7 +86,7 @@ npm run serve -- --god --board 12p              # 新对局默认 12 人
 
 | 层 | 证据 |
 |---|---|
-| 模型/agent | `agent_error`、`default_action`、`transcripts/seat-N.jsonl`、`PiPlayerError.fatal` |
+| 模型/agent | `model_retry`、`agent_error`、`default_action`、`transcripts/seat-N.jsonl`、`PiPlayerError.fatal` |
 | 工具/参数 | 工具返回“行动被拒绝”、`action_rejected.data.code` |
 | 规则/结算 | `RuleError.code`、`death`（judge 事件含 causes）、`game_end` |
 | 流程/编排 | 最后一条 `turn_start`、`summary.phase`、`eventCount` |
@@ -112,7 +116,7 @@ npm run serve -- --god --board 12p              # 新对局默认 12 人
 - 真实模型在长上下文（>50k tokens）下的稳定性；v1 未做压缩。
 - 多进程并发对局（runner 每次一局，输出目录独立）。
 - 守卫/白狼王/狼美人、PK 二次投票、自爆（未实现）。
-- 网络抖动下的 provider 重试细节（依赖 pi agent-core 的重试；超时后使用保底动作）。
-- 观战页的视觉效果没有自动化 gate；用 Playwright 手工截图检查过桌面/移动宽度、回放、12 人圆桌。
+- 退避和重试通过模型流替身注入失败验证；未在真实网关上制造限流或故障。
+- 观战页暂未接入浏览器门禁；已用本机 Chrome 检查桌面、窄屏及横屏的实际布局和流程。
 - 观战服务没有鉴权，默认只绑定 `127.0.0.1`；公网部署不在验证范围。
 - 模型发言的“质量”（逻辑好坏）不是机器判定项；只判定规则与流程。策略提示词的效果需要看 transcript 和真实对局，不能用单测断言。

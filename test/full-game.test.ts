@@ -32,6 +32,13 @@ test("随机策略全流程：30 个种子全部正常结束，事件序列可�
 		assert.equal(events.at(-1)?.type, "game_end");
 		assert.equal(events.filter((e) => e.type === "game_end").length, 1);
 		assert.equal(events.filter((e) => e.type === "action_rejected").length, 0);
+		assert.equal(events.some((e) => e.type === "wolf_plan"), true, `seed ${seed} 没有狼队计划`);
+		assert.equal(
+			events.some((e) => e.type === "wolf_plan" && e.visibility.kind === "public"),
+			false,
+			`seed ${seed} 狼队计划泄露到公开事件`,
+		);
+		assert.equal((engine.state.wolfPlan?.length ?? 0) > 0, true, `seed ${seed} 计划为空`);
 
 		for (let index = 0; index < events.length; index++) {
 			assert.equal(events[index]?.seq, index + 1, `seed ${seed} 事件序号断裂`);
@@ -85,6 +92,13 @@ test("12 人随机策略全流程：20 个种子全部正常结束，含警长�
 		);
 		assert.equal(events.filter((e) => e.type === "action_rejected").length, 0);
 		assert.equal(events.length > 60, true, `seed ${seed} 事件过少`);
+		assert.equal(events.some((e) => e.type === "wolf_plan"), true, `seed ${seed} 没有狼队计划`);
+		assert.equal(
+			events.some((e) => e.type === "wolf_plan" && e.visibility.kind === "public"),
+			false,
+			`seed ${seed} 狼队计划泄露到公开事件`,
+		);
+		assert.equal((engine.state.wolfPlan?.length ?? 0) > 0, true, `seed ${seed} 计划为空`);
 
 		const end = events.at(-1)!;
 		const roles = end.data?.roles as Record<string, string>;

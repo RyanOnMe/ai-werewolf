@@ -9,7 +9,8 @@ const HELP = `用法：node src/cli/serve.ts [选项]
   --runs <dir>      对局目录（默认 runs）
   --board <9p|12p>  新对局默认板子（默认 9p；12p 含警长竞选与白痴）
   --god             启用上帝视角（默认可切换为上帝视角的按钮隐藏）
-  --model <id>      前端“真实模型”表单的默认模型
+  --model <spec>    前端“真实模型”表单的默认模型；多个用逗号分隔，按座位轮流
+  --models <list>   同 --model，可逗号分隔
   --thinking <l>    默认 thinking level（默认 low）
   --max-days <n>    默认最大天数（默认 30）
   --timeout <sec>   单回合模型超时（默认 240）
@@ -45,7 +46,7 @@ async function main(): Promise<void> {
 	}
 	const board = boardArg;
 	const god = boolArg(args, "god");
-	const model = stringArg(args, "model");
+	const model = stringArg(args, "models") ?? stringArg(args, "model");
 	const thinking = stringArg(args, "thinking", "low")!;
 	const maxDays = numberArg(args, "max-days", 30);
 	const timeoutMs = numberArg(args, "timeout", 240) * 1000;

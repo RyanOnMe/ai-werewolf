@@ -16,6 +16,9 @@
 ```bash
 npm install
 
+# 0) 可选：配置 Paratera 网关（DeepSeek-V4.1-Flash-1017 / MiniMax-M3.1-Flash）
+cp .env.example .env   # 填入 PARATERA_API_KEY
+
 # 1) 不需要模型鉴权：随机策略跑完一局
 npm run play -- --scripted --seed demo
 
@@ -25,10 +28,14 @@ npm run play -- --mode 12p --scripted --seed demo-12p
 # 2) 真实模型跑一局
 npm run play -- --mode 12p --model openai-codex/gpt-5.6-luna --seed live-12p
 
-# 3) 先用最小回合验证模型/工具链
-npm run smoke:llm -- --model openai-codex/gpt-5.6-luna
+# 双模型按座位交替（奇数座位 → DeepSeek，偶数座位 → MiniMax）
+npm run play -- --mode 12p --models "commandcode/deepseek/deepseek-v4.1-flash,commandcode/minimax/minimax-m3.1-flash" --seed dual-12p --stream
 
-# 4) 查看本机 pi 可用的模型
+# 3) 先用最小回合验证模型/工具链
+npm run smoke:llm -- --model commandcode/deepseek/deepseek-v4.1-flash
+npm run smoke:llm -- --model commandcode/minimax/minimax-m3.1-flash
+
+# 4) 查看可用的模型
 npm run doctor
 
 # 5) 浏览器观战（默认公开视角）
@@ -39,29 +46,29 @@ npm run serve -- --god --open
 
 # 7) 指定新对局默认板子
 npm run serve -- --god --board 12p --open
+
+# 8) 双模型按座位交替
+npm run serve -- --god --board 12p \
+  --model "commandcode/deepseek/deepseek-v4.1-flash,commandcode/minimax/minimax-m3.1-flash" \
+  --open
 ```
 
-真实模型会复用 pi 的登录状态（`~/.pi/agent/auth.json`，OAuth 或 API key），不需要在项目里重复配置 key。
+使用 Command Code 时，把 `.env.example` 复制为 `.env` 并填入 `COMMANDCODE_API_KEY`；CLI 和观战页会默认选择该网关的 DeepSeek V4.1 Flash。也可使用 pi 的登录状态（`~/.pi/agent/auth.json`，OAuth 或 API key）或配置 Paratera。`.env` 已被 Git 忽略。
 
 ## 观战前端
 
-![观战界面](docs/assets/spectator-public.png)
+![12 人双模型观战台，当前发言实时更新](docs/assets/spectator-match-desk.png)
 
-![12 人局 · 上警](docs/assets/spectator-12p-public.png)
+[查看窄屏观战布局](docs/assets/spectator-match-desk-mobile.png)
 
 `npm run serve` 启动一个本地观战服务（默认 `http://127.0.0.1:7331`）：
 
-- **9/12 人圆桌**：座位号、存活/出局、白痴翻牌、警长徽记、当前行动者高亮。
-- **公开视角 / 上帝视角**：公开视角只接收 `public` 事件；上帝视角需要服务端 `--god`，显示身份、狼队频道、查验、女巫用药、警长竞选和死因。
-- **实时时间线**：SSE 推送，自动跟随；可拖动滑块回放、自动回放；上警、竞选发言、警长票、警徽移交和白痴翻牌都会进入时间线。
-- **浏览器内开新局**：可选 9 人 / 12 人、脚本模式或真实模型；模型列表来自 pi 当前可用模型。
-- **自动发现对局**：扫描 `runs/`，CLI 正在跑的对局也能直接观战。
+- **9/12 个座位同屏**：显示存活、出局、翻牌、警徽和行动者，点击座位可查看完整模型名。Logo 按实际模型家族加载，本地素材来源见 [图标说明](web/models/README.md)。
+- **赛况、纪事、情报**：当前发言和重试状态实时更新；长正文可翻页或打开“全文”，纪事可按事件类型和日期筛选。支持定格、跳到某条事件、自动回放和回到最新。
+- **公开视角 / 上帝视角**：公开视角只接收公开事件和公开发言草稿；`--god` 可查看角色、狼队频道、查验、用药、死因和重试记录。
+- **浏览器内开局**：可选 9 人或 12 人、脚本或真实模型。浏览器启动的真实模型局可看流式草稿；CLI 启动的对局也能从 `runs/` 观战，浏览器只读已确认事件，CLI 可用 `--stream` 看草稿。
 
-![上帝视角](docs/assets/spectator-god.png)
-
-![12 人局上帝视角](docs/assets/spectator-12p-god.png)
-
-观战服务只读 `runs/<gameId>/events.ndjson`，不会暴露 `transcripts/`，也不参与游戏状态。公开视角在服务端过滤掉 `seat` / `wolves` / `judge` 事件；`--god` 是唯一的私密信息开关。默认只绑定 `127.0.0.1`，不要在没有额外保护时把 `--host 0.0.0.0` 和 `--god` 一起暴露到公网。
+草稿来自发言工具参数，取决于模型接口是否提供参数分片。草稿不进入回放和其他玩家的简报；只有法官确认的发言进入事件日志。服务端过滤私密内容，不提供 transcript 或完整摘要。默认只监听 `127.0.0.1`，不要把 `--host 0.0.0.0` 和 `--god` 一起暴露到公网。
 
 ## 验证
 
@@ -72,15 +79,18 @@ npm run verify
 包含：
 
 - `tsc --noEmit`
-- 34 个测试
+- 自动化测试
   - 规则单测：夜晚结算、女巫双药、猎人毒杀、投票平票、胜负优先级、信息可见性
   - 30 个 9 人种子 + 20 个 12 人种子的随机全流程：每局必须正常结束、胜者非空、事件 seq 连续、恰好一个 `game_end`、无非法动作；12 人局必须恰好一次警长竞选，夜间死亡不得有遗言
   - 12 人专项：上警、警长竞选投票、1.5 票、警徽移交、白痴翻牌免死/失去投票权、猎人开枪遗言
+  - 模型路由：逗号/数组解析、双模型按座位交替、双模型组合生成、座位分配摘要
+  - 狼队战术：首夜计划、计划只对狼队可见、下一夜可更新、默认动作与 `set_wolf_plan` 工具
   - pi agent loop 集成测试：用 fake model stream 走真实 `Agent` + 真实工具 schema，验证工具接受/拒绝、纠正提示、重复行动阻止、fatal 错误、警长工具
   - 观战服务：静态页、配置、脚本对局、12 人上警 SSE、公开/上帝过滤、403/404/路径穿越防护
+  - 模型稳定性：断流后重试、指数退避次数上限、超时取消、永久错误跳过重试、草稿不触发工具或进入回放
 - 两局通过真实 CLI 的 scripted 对局（9 人 + 12 人），并检查 `summary.json` 不变量
-- 一局真实模型的 9 人局（本地运行产物 `runs/live-demo-2`，gitignored）
-- 一局真实模型的 12 人上警局（`runs/strategy-12p`，gitignored；medium thinking，5 天，309 事件，1 次超时保底；策略观察见 [strategy-eval.md](docs/agent/strategy-eval.md)）
+
+真实模型检查单独运行 `npm run smoke:llm`。历史对局观察见 [策略验证记录](docs/agent/strategy-eval.md)。
 
 ## 架构
 
@@ -135,20 +145,16 @@ GameEngine ──► events.ndjson ──► SSE /api/games/:id/events?view=publ
 如果 agent 只输出文字、调用非法目标、模型超时或 provider 出错：
 
 - 非法目标 → 工具返回拒绝原因，agent 可以重试；
+- 暂时性模型错误 → 重试当前请求，最多三次，等待时间以 750ms 为基数指数增长并加随机扰动，等待与请求共用回合超时；重试记录是 `model_retry`；
 - 只输出文字 → 法官发一次纠正提示；
 - 仍不行动 / 超时 → 使用该回合的合法保底动作（弃票、空刀、不用药、放弃开枪等）；
 - fatal（鉴权/模型不支持）或连续失败 → 中止并留下完整证据。
 
 ## 策略提示词
 
-相比只给规则，现在每个玩家额外拿到：
+玩家先区分法官事实、角色私密信息和其他玩家的声称，再比较两种局势解释、归票可行性和失手后的胜负。简报给出有票座位、加权票数、最近两轮票型和公开事件，`view_log` 支持按天数或座位查证。
 
-- **角色策略手册**：胜负计算、狼人刀法/伪装、预言家验人与起跳、女巫用药、猎人枪法、白痴翻牌、警长竞选与警徽流。
-- **每回合决策检查**：按当前动作给出“这一刀/这一验/这一票如何推动阵营胜利”的检查清单。
-- **公开局势摘要**：自动提取公开发言里的自称、查杀/金水，附最近票型和警长竞选结果（明确标注可能是谎言）。
-- **按需策略工具**：`view_strategy` 随时重新读取本局身份对应的策略手册。
-
-实测见 [docs/agent/strategy-eval.md](docs/agent/strategy-eval.md)：12 人局 `gpt-5.6-luna` + `--thinking medium` 已经出现预言家起跳、警徽流、对跳比较、票型复盘和狼人带队。代价是 12 分钟、约 117 万 total tokens；成本敏感时用 `low`，或只跑 9 人局。
+角色策略按当前目标选动作：预言家优先验能改变归票的活人，女巫区分被刀和好人，警长按本方收益交徽，狼队给主刀口、备用目标、分工和调整条件。发言应引用具体座位和证据，说明什么新信息会改变选择。策略质量评估与流程验证分开记录。
 
 ## 为什么这样设计
 
@@ -184,7 +190,7 @@ npm run replay -- runs/<gameId>
 npm run replay -- runs/<gameId> --show-private --show-roles
 
 # 查异常
-jq -c 'select(.type=="agent_error" or .type=="default_action" or .type=="action_rejected")' \
+jq -c 'select(.type=="model_retry" or .type=="agent_error" or .type=="default_action" or .type=="action_rejected")' \
   runs/<gameId>/events.ndjson
 
 # 看某个玩家为什么这么发言
@@ -200,7 +206,8 @@ node src/cli/play.ts [选项]
   --out <dir>            输出目录（默认 runs/<gameId>）
   --mode <9p|12p>        板子（默认 9p；12p 含上警与白痴）
   --scripted             无 LLM 随机策略
-  --model <provider/id>  玩家模型
+  --model <provider/id>  玩家模型；多个用逗号分隔，按座位轮流
+  --models <list>        同 --model，可逗号分隔
   --thinking <level>     minimal|low|medium|high|xhigh|max（默认 low）
   --max-tokens <n>       单次模型输出上限
   --max-days <n>         最大天数
@@ -208,6 +215,7 @@ node src/cli/play.ts [选项]
   --show-private         打印私密/狼队事件
   --verbose              打印工具调用与流程
   --quiet                只打印摘要
+  --stream               逐段打印发言草稿（狼队草稿还需 --show-private）
 
 node src/cli/replay.ts <run目录|events.ndjson> [--show-private] [--show-roles] [--verbose]
 node src/cli/serve.ts [--god] [--board 9p|12p] [--port 7331] [--host 127.0.0.1] [--open]
@@ -217,9 +225,14 @@ node src/cli/smoke.ts [--model ...]
 
 ## 模型
 
-- 通过 pi `ModelRuntime` 读取 `~/.pi/agent/auth.json`，支持 OAuth 刷新。
-- `npm run doctor` 列出当前账号可用模型。
-- 如果默认模型报 `model ... is not supported`，用 `--model` 指定账号可用的模型。本机实测 `openai-codex/gpt-5.6-luna`、`gpt-5.6-terra` 可用。
+- 通过 pi `ModelRuntime` 读取 `~/.pi/agent/auth.json`（OAuth/API key），并按环境配置注册模型网关。显式指定 `--model` 优先。
+- Command Code 使用 OpenAI Chat Completions（`https://api.commandcode.ai/provider/v1/chat/completions`）。设置 `COMMANDCODE_API_KEY` 后可用 `commandcode/deepseek/deepseek-v4.1-flash` 和 `commandcode/minimax/minimax-m3.1-flash`。
+- Paratera 配置：复制 `.env.example` 为 `.env`，填入 `PARATERA_API_KEY`。内置两个模型：
+  - `paratera/DeepSeek-V4.1-Flash-1017`
+  - `paratera/MiniMax-M3.1-Flash`
+- `--model a,b` 或 `--models "a,b"` 会按座位轮流分配：1 号用第一个模型、2 号用第二个、3 号回到第一个，依此类推。浏览器开新局时，检测到两个模型会出现“双模型交替”选项。
+- 两个 Paratera 模型都已通过真实 smoke：`say` / `view_state` 工具调用正常，`reasoning_effort=high` 可用；MiniMax 首轮响应明显更慢，建议单回合超时不低于 240 秒。
+- `npm run doctor` 列出已配置鉴权的模型。
 - 真实一局大约 50-80 次模型调用（12 人局更多），每次输入约 1.5-5k tokens。注意成本与耗时。
 - 想看到更多谋略，建议用 `--thinking medium` 或 `high`，并在 12 人局使用支持较强推理的模型；策略手册已内置在 system prompt，也可通过 `view_strategy` 工具随时查看。
 

@@ -6,6 +6,7 @@ import {
 	type StopReason,
 } from "@earendil-works/pi-ai";
 import type { StreamFn } from "@earendil-works/pi-agent-core";
+import { setTimeout as delay } from "node:timers/promises";
 
 export const FAKE_MODEL: Model<"fake-api"> = {
 	id: "fake-model",
@@ -92,4 +93,41 @@ export function errorStream(errorMessage: string): StreamFn {
 		});
 		return stream;
 	};
+}
+
+export function streamedTool(
+	name: string,
+	field: string,
+	chunks: string[],
+	options: { intervalMs?: number; error?: string; privateText?: string } = {},
+): ReturnType<typeof createAssistantMessageEventStream> {
+	const stream = createAssistantMessageEventStream();
+	void (async () => {
+		const body = options.privateText ? [{ type: "text" as const, text: options.privateText }] : [];
+		const index = body.length;
+		const partial = makeMessage(body, "toolUse");
+		stream.push({ type: "start", partial });
+		if (options.privateText) {
+			stream.push({ type: "text_delta", contentIndex: 0, delta: options.privateText, partial });
+		}
+		let text = "";
+		for (const chunk of chunks) {
+			text += chunk;
+			const toolCall = { type: "toolCall" as const, id: "streamed-tool", name, arguments: { [field]: text } };
+			const update = { ...partial, content: [...body, toolCall] };
+			stream.push({ type: "toolcall_delta", contentIndex: index, delta: chunk, partial: update });
+			if (options.intervalMs) await delay(options.intervalMs);
+		}
+		const message = makeMessage([...body, {
+			type: "toolCall", id: "streamed-tool", name, arguments: { [field]: text },
+		}], options.error ? "error" : "toolUse");
+		if (options.error) {
+			message.errorMessage = options.error;
+			stream.push({ type: "error", reason: "error", error: message });
+		} else {
+			stream.push({ type: "done", reason: "toolUse", message });
+		}
+		stream.end(message);
+	})();
+	return stream;
 }

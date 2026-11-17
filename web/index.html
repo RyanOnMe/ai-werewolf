@@ -3,139 +3,205 @@
 	<head>
 		<meta charset="UTF-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-		<title>AI 狼人杀 · 观战</title>
-		<link
-			rel="icon"
-			href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%230b1020'/%3E%3Ctext x='32' y='44' font-size='36' text-anchor='middle' fill='%23d9b45b'%3E%E7%8B%BC%3C/text%3E%3C/svg%3E"
-		/>
+		<meta name="color-scheme" content="light" />
+		<title>月下狼人杀 · AI 狼人杀观战</title>
+		<link rel="icon" type="image/svg+xml" href="/mark.svg" />
 		<link rel="stylesheet" href="/styles.css" />
 	</head>
 	<body>
-		<div class="ambient" aria-hidden="true"></div>
 		<div class="app">
 			<header class="topbar">
 				<div class="brand">
-					<div class="brand-mark">狼</div>
-					<div class="brand-text">
-						<h1>AI 狼人杀</h1>
-						<p>观战模式 · 确定性法官 + pi agent 玩家</p>
+					<img src="/mark.svg" alt="" width="40" height="40" />
+					<div>
+						<h1>月下狼人杀</h1>
+						<span>AI WEREWOLF</span>
 					</div>
 				</div>
-				<div class="topbar-actions">
-					<label class="field inline">
-						<span>对局</span>
-						<select id="game-select" aria-label="选择对局">
-							<option value="">加载中…</option>
-						</select>
-					</label>
-					<div class="segmented" id="view-toggle" hidden>
-						<button type="button" data-view="public" class="active">公开视角</button>
-						<button type="button" data-view="god">上帝视角</button>
-					</div>
-					<button type="button" id="refresh-btn" class="btn ghost">刷新</button>
-					<button type="button" id="new-game-btn" class="btn primary">新对局</button>
+				<label class="match-control">
+					<span>对局</span>
+					<select id="game-select" aria-label="选择对局" disabled><option value="">加载中…</option></select>
+				</label>
+				<div class="segmented" id="view-toggle" role="group" aria-label="观战视角" hidden>
+					<button type="button" data-view="public" aria-pressed="true">公开</button>
+					<button type="button" data-view="god" aria-pressed="false">上帝</button>
 				</div>
+				<button type="button" id="refresh-btn" class="button icon-button" title="刷新对局列表" aria-label="刷新对局列表">
+					<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 8a8 8 0 1 0 1 7M19 3v5h-5" /></svg>
+				</button>
+				<button type="button" id="new-game-btn" class="button dark new-game-button">
+					<span aria-hidden="true">+</span> 新对局
+				</button>
 			</header>
 
-			<section class="new-game-panel" id="new-game-panel" hidden>
-				<form id="new-game-form" class="new-game-form">
-					<div class="new-game-title">
-						<h2>开始一局</h2>
-						<p>脚本对局不需要模型；真实模型会复用 pi 的登录状态。</p>
-					</div>
-					<label class="field">
-						<span>板子</span>
-						<select id="board-select">
-							<option value="9p">9 人局</option>
-							<option value="12p">12 人局 · 上警</option>
-						</select>
-					</label>
-					<label class="field">
-						<span>模式</span>
-						<select id="mode-select">
-							<option value="scripted">脚本对局（快速）</option>
-							<option value="live">真实模型</option>
-						</select>
-					</label>
-					<label class="field">
-						<span>种子</span>
-						<input id="seed-input" type="text" maxlength="80" autocomplete="off" />
-					</label>
-					<label class="field" id="model-field">
-						<span>模型</span>
-						<select id="model-select"></select>
-					</label>
-					<button type="submit" id="start-game-btn" class="btn primary">开始对局</button>
-					<p class="form-hint" id="new-game-hint"></p>
-				</form>
-			</section>
-
-			<div class="error-banner" id="error-banner" hidden>
-				<span id="error-text"></span>
-				<button type="button" id="error-close" aria-label="关闭">×</button>
-			</div>
-
-			<main class="layout">
-				<section class="card table-card">
-					<div class="card-head">
-						<div>
-							<div class="eyebrow" id="game-id">未选择对局</div>
-							<h2 id="phase-title">等待对局</h2>
+			<main class="desk">
+				<section class="match-bar" aria-label="对局概况">
+					<div class="match-primary">
+						<div class="match-tags">
+							<span id="status-pill" class="status-pill" data-state="idle">待开局</span>
+							<span id="game-id" class="match-id">MATCH DESK</span>
 						</div>
-						<div class="status-pill" id="status-pill" data-state="idle">未连接</div>
+						<h2 id="phase-title">等待对局</h2>
 					</div>
+					<div class="metrics">
+						<div class="metric"><span>存活</span><strong id="alive-count">—</strong></div>
+						<div class="metric"><span>出局</span><strong id="dead-count">—</strong></div>
+						<div class="metric badge-metric"><span>警徽</span><strong id="sheriff-label">—</strong></div>
+					</div>
+				</section>
 
-					<div class="table-wrap" id="table-wrap">
-						<div class="table-rim" aria-hidden="true"></div>
-						<div class="seats-ring" id="seats-ring"></div>
-						<div class="table-center" id="table-center">
-							<div class="center-day" id="day-label">—</div>
-							<div class="center-phase" id="phase-label">等待对局</div>
-							<div class="center-sheriff" id="sheriff-label">无警长</div>
-							<div class="center-counts">
-								<span>存活 <b id="alive-count">—</b></span>
-								<span>出局 <b id="dead-count">—</b></span>
+				<div class="workbench">
+					<section class="pane roster-pane" aria-labelledby="roster-title">
+						<header class="pane-head">
+							<div class="pane-title">
+								<span class="index-tag">01</span>
+								<h2 id="roster-title">玩家席</h2>
 							</div>
-							<div class="center-winner" id="winner-label" hidden></div>
-						</div>
-					</div>
+							<span class="pane-tag" id="board-label">9 人局</span>
+						</header>
+						<div class="seat-grid" id="seat-grid" role="group" aria-label="玩家座位"></div>
+						<footer class="roster-foot">
+							<span id="roster-note">等待玩家入席</span>
+							<span class="roster-key"><i></i> 存活 <i></i> 行动中</span>
+						</footer>
+					</section>
 
-					<div class="god-panel" id="god-panel" hidden>
-						<div class="god-head">
-							<h3>上帝视角</h3>
-							<span class="god-tag">仅本地</span>
-						</div>
-						<div id="god-content"></div>
-					</div>
-				</section>
+					<section class="pane feed-pane" aria-labelledby="feed-title">
+						<header class="pane-head feed-head">
+							<div class="pane-title">
+								<span class="index-tag">02</span>
+								<h2 id="feed-title">播报台</h2>
+							</div>
+							<div class="segmented feed-tabs" id="feed-tabs" role="group" aria-label="播报内容">
+								<button type="button" data-pane="live" aria-pressed="true" aria-controls="reader">赛况</button>
+								<button type="button" data-pane="history" aria-pressed="false" aria-controls="history">纪事</button>
+								<button type="button" data-pane="intel" aria-pressed="false" aria-controls="reader" hidden>情报</button>
+							</div>
+						</header>
 
-				<section class="card timeline-card">
-					<div class="card-head timeline-head">
-						<div>
-							<div class="eyebrow">事件流</div>
-							<h2>时间线</h2>
+						<div class="feed-main">
+							<section class="reader" id="reader" aria-label="播报内容">
+								<div class="reader-top" id="reader-top">
+									<button type="button" id="detail-back" class="button small" hidden>‹ 纪事</button>
+									<label class="intel-picker" id="intel-picker" hidden>
+										<span class="sr-only">选择情报</span>
+										<select id="intel-select"></select>
+									</label>
+									<div class="speaker" id="speaker">
+										<div class="speaker-mark" id="speaker-mark" aria-hidden="true"></div>
+										<div class="speaker-text">
+											<strong id="reader-title">等待开局</strong>
+											<span id="reader-meta">对局播报</span>
+										</div>
+									</div>
+									<span class="reader-state" id="reader-state" hidden></span>
+								</div>
+								<div class="reader-content" id="reader-content">
+									<p class="reader-text" id="reader-text"></p>
+									<p class="reader-text measure" id="reader-measure" aria-hidden="true"></p>
+								</div>
+								<footer class="reader-foot">
+									<button type="button" id="detail-jump" class="button small text-button" hidden>跳到此刻</button>
+									<button type="button" id="reader-expand" class="button small" aria-controls="reader-dialog" hidden>全文</button>
+									<div class="pager" id="reader-pager" hidden aria-label="发言翻页">
+										<button type="button" id="reader-prev" class="button small arrow" aria-label="发言上一页">‹</button>
+										<span id="reader-page">1 / 1</span>
+										<button type="button" id="reader-next" class="button small arrow" aria-label="发言下一页">›</button>
+									</div>
+								</footer>
+							</section>
+							<section class="history" id="history" aria-label="对局纪事" hidden>
+								<div class="history-tools">
+									<div class="history-selects">
+										<label>
+											<span class="sr-only">事件类型</span>
+											<select id="history-filter">
+												<option value="all">全部事件</option>
+												<option value="speech">发言与遗言</option>
+												<option value="vote">投票与警徽</option>
+												<option value="key">关键事件</option>
+												<option value="private" hidden>私密事件</option>
+											</select>
+										</label>
+										<label>
+											<span class="sr-only">事件天数</span>
+											<select id="history-day"><option value="">全部天数</option></select>
+										</label>
+									</div>
+									<span id="history-count"></span>
+								</div>
+								<div class="history-items" id="history-items"></div>
+								<div class="pager history-pager" aria-label="纪事翻页">
+									<button type="button" id="history-prev" class="button small arrow" aria-label="纪事上一页">‹</button>
+									<span id="history-page">1 / 1</span>
+									<button type="button" id="history-next" class="button small arrow" aria-label="纪事下一页">›</button>
+								</div>
+							</section>
 						</div>
-						<div class="timeline-actions">
-							<button type="button" id="replay-btn" class="btn tiny ghost" hidden>自动回放</button>
-							<button type="button" id="latest-btn" class="btn tiny ghost" hidden>回到最新</button>
+
+						<div class="replay-bar" aria-label="对局回放">
+							<div class="replay-meta">
+								<span id="scrubber-label">事件 0 / 0</span>
+								<span id="follow-label">跟随最新</span>
+							</div>
+							<div class="replay-controls">
+								<button type="button" id="replay-btn" class="button small replay-btn" aria-label="自动回放" title="自动回放" disabled>▶</button>
+								<input type="range" id="scrubber" min="0" max="0" value="0" aria-label="回放进度" disabled />
+								<button type="button" id="latest-btn" class="button small" disabled>最新</button>
+							</div>
 						</div>
-					</div>
-					<div class="timeline" id="timeline"></div>
-					<div class="scrubber">
-						<input type="range" id="scrubber" min="0" max="0" value="0" aria-label="时间线" />
-						<div class="scrubber-meta">
-							<span id="scrubber-label">事件 0 / 0</span>
-							<span id="follow-label">跟随最新</span>
-						</div>
-					</div>
-				</section>
+					</section>
+				</div>
 			</main>
 
-			<footer class="footer">
-				<span>公开视角只包含 public 事件；上帝视角需要服务端以 --god 启动。</span>
-				<span id="connection-note">选择对局开始观战</span>
+			<footer class="statusbar">
+				<span class="statusbar-brand"><span aria-hidden="true">◆</span> 月下观战台</span>
+				<span id="connection-note">等待选择对局</span>
 			</footer>
 		</div>
-		<script src="/app.js" defer></script>
+
+		<dialog id="reader-dialog" aria-label="完整播报"></dialog>
+
+		<dialog id="new-game-panel" aria-labelledby="new-game-title">
+			<div class="dialog-head">
+				<div>
+					<span class="eyebrow">NEW MATCH</span>
+					<h2 id="new-game-title">开启一局</h2>
+				</div>
+				<button type="button" id="new-game-close" class="button icon-button" aria-label="关闭新对局">×</button>
+			</div>
+			<form id="new-game-form">
+				<label class="field"><span>人数</span><select id="board-select">
+					<option value="9p">9 人 · 预女猎</option>
+					<option value="12p">12 人 · 警长与白痴</option>
+				</select></label>
+				<label class="field"><span>玩家</span><select id="mode-select">
+					<option value="scripted">脚本玩家</option>
+					<option value="live">真实模型</option>
+				</select></label>
+				<label class="field" id="model-field"><span>模型</span><select id="model-select"></select></label>
+				<label class="field"><span>种子</span><input id="seed-input" type="text" maxlength="80" autocomplete="off" /></label>
+				<p class="form-hint" id="new-game-hint" aria-live="polite"></p>
+				<button type="submit" id="start-game-btn" class="button dark">开始对局</button>
+			</form>
+		</dialog>
+
+		<dialog id="seat-dialog" aria-labelledby="seat-detail-title">
+			<form method="dialog" class="dialog-head">
+				<div>
+					<span class="eyebrow">PLAYER</span>
+					<h2 id="seat-detail-title"></h2>
+				</div>
+				<button class="button icon-button" aria-label="关闭座位详情">×</button>
+			</form>
+			<div id="seat-detail"></div>
+		</dialog>
+
+		<div class="error-banner" id="error-banner" role="alert" hidden>
+			<span id="error-text"></span>
+			<button type="button" id="error-close" class="button small" aria-label="关闭错误提示">×</button>
+		</div>
+		<noscript>此观战台需要启用 JavaScript。</noscript>
+		<script type="module" src="/app.js"></script>
 	</body>
 </html>

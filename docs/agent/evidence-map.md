@@ -6,12 +6,14 @@
 |---|---|---|
 | 游戏没有结束 / 卡住 | `summary.json`、最后一条 `turn_start` | `jq -c 'select(.type=="turn_start") \| .data' runs/<gameId>/events.ndjson \| tail -1` |
 | 某玩家没行动 | `agent_error` / `default_action` 事件、该座位 transcript | `jq -c 'select(.type=="agent_error" or .type=="default_action")' runs/<gameId>/events.ndjson` |
+| 模型退避或重新出草稿 | `model_retry` 事件；赛况的当前进度 | `model_retry.data` 有座位、回合、原因、等待时间和重试序号；草稿不落盘 |
 | 模型鉴权/模型不支持 | `summary.error`、`npm run doctor` | `jq -r .error runs/<gameId>/summary.json` |
 | 非法动作 | `action_rejected` 事件、工具拒绝文本 | `jq -c 'select(.type=="action_rejected") \| .data' runs/<gameId>/events.ndjson` |
 | 行动顺序/阶段不对 | 事件 `phase`、`turn_start` 序列 | `jq -c 'select(.type=="turn_start") \| {seq,day,phase:.phase,data}' runs/<gameId>/events.ndjson` |
 | 死亡/胜负不对 | `summary.json` 的 `winner/endReason/deaths`、`game_end` 事件 | `jq -c 'select(.type=="game_end") \| .data' runs/<gameId>/events.ndjson` |
 | 夜晚死因/解药/毒药 | `death` 的 judge 事件（含 causes）、女巫 transcript | `jq -c 'select(.type=="death" and .visibility.kind=="judge")' runs/<gameId>/events.ndjson` |
 | 夜间死者为什么有/没有遗言 | `last_words` 事件与 `death.phase` | 夜晚死亡应为 0 条遗言；`jq -c 'select(.type=="last_words")' runs/<gameId>/events.ndjson` |
+| 狼队战术计划缺失/泄露 | `wolf_plan` 事件（wolves 可见）、`summary.wolfPlan` | `jq -c 'select(.type=="wolf_plan")' runs/<gameId>/events.ndjson`；公开 SSE 不应出现 |
 | 上警/警长流程不对 | `sheriff_signup`、`sheriff_speech`、`sheriff_vote`、`sheriff_elected`、`turn_start` | `jq -c 'select(.type\|startswith("sheriff"))' runs/<gameId>/events.ndjson` |
 | 警长票权不对 | `vote_record.data.tally`、`sheriff` | `jq -c 'select(.type=="vote_record") \| .data' runs/<gameId>/events.ndjson` |
 | 警徽移交/销毁 | `badge_transfer` 事件、`sheriff` 状态 | `jq -c 'select(.type=="badge_transfer")' runs/<gameId>/events.ndjson` |
@@ -34,7 +36,7 @@
 `transcripts/seat-N.jsonl` 每行一个 JSON：
 
 1. `{"role":"system","content":"..."}`：该玩家的 system prompt（身份 + 本局完整规则 + 角色策略手册 + 行为准则）。
-2. `{"role":"user","content":"[法官] 第N天..."}`：每回合简报，含公开自称/查杀/金水摘要、最近投票、警长状态、决策检查清单。
+2. `{"role":"user","content":"[法官] 第N天..."}`：每回合简报，含最近的实际票型与票权、狼队战术计划（仅狼人）、警长状态及本轮要权衡的选择。
 3. `{"role":"assistant","content":[...] }`：模型自由文本、thinking、tool call。
 4. `{"role":"toolResult","toolName":"say","content":[...]}`：工具结果（包括“行动被拒绝”）。
 5. 纠正提示也是 user 消息。

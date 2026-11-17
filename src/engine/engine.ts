@@ -15,6 +15,7 @@ import {
 	type Visibility,
 	type Winner,
 	type Role,
+	MAX_WOLF_PLAN_CHARS,
 	ROLE_LABEL,
 	canVote,
 	factionOf,
@@ -191,6 +192,9 @@ export class GameEngine {
 			sheriff: null,
 			sheriffElectionHeld: false,
 			sheriffCandidates: [],
+			wolfPlan: null,
+			wolfPlanDay: null,
+			wolfPlanAuthor: null,
 			winner: null,
 			endReason: null,
 		};
@@ -389,6 +393,9 @@ export class GameEngine {
 			data: { night: this.state.day },
 		});
 		const wolves = this.aliveSeats().filter((seat) => this.player(seat).role === "werewolf");
+		if (wolves.length > 0) {
+			this.queue.push({ t: "turn", kind: "wolf_strategy", seat: wolves[0]! });
+		}
 		for (const seat of wolves) {
 			this.queue.push({ t: "turn", kind: "wolf_turn", seat });
 		}
@@ -813,6 +820,29 @@ export class GameEngine {
 		}
 
 		switch (task.kind) {
+			case "wolf_strategy": {
+				if (player.role !== "werewolf" || !player.alive) return null;
+				this.state.phase = "night_wolves";
+				const previous = this.state.wolfPlan?.trim();
+				const promptHint = previous
+					? "轮到你更新狼队战术。指出昨天哪一条事实改变了旧判断，再用 set_wolf_plan 提交本夜刀口、白天的座位分工和换方案的条件。"
+					: "轮到你为狼队制定战术。首夜身份信息有限，用 set_wolf_plan 提交暂定刀口、白天的座位分工和一条可验证的换方案条件。计划仅狼队可见。";
+				return {
+					id: turnId,
+					kind: "wolf_strategy",
+					seat: task.seat,
+					day: this.state.day,
+					phase: this.state.phase,
+					legalTargets: [],
+					promptHint,
+					wolfTeammates: this.state.players
+						.filter((p) => p.role === "werewolf" && p.seat !== task.seat)
+						.map((p) => p.seat),
+					previousWolfPlan: this.state.wolfPlan,
+					previousWolfPlanDay: this.state.wolfPlanDay,
+					previousWolfPlanAuthor: this.state.wolfPlanAuthor,
+				};
+			}
 			case "wolf_turn": {
 				if (player.role !== "werewolf" || !player.alive) return null;
 				this.state.phase = "night_wolves";
@@ -898,7 +928,7 @@ export class GameEngine {
 					legalTargets: [],
 					sheriffCandidates: [...this.state.sheriffCandidates].sort((a, b) => a - b),
 					promptHint:
-						"你是警上候选人。请调用 sheriff_say 发表竞选发言：说明上警目的、身份或站边、对当前局势的判断，以及拿到警徽后的验人/归票计划。狼人可以悍跳和编造警徽流；好人要给出可信的带队方案。不要只说“我上警”。",
+						"你是警上候选人。调用 sheriff_say 说明上警目的和拿到警徽后的实际安排；报验者说明下一验，其他人可以给站边或给后置位留问题。",
 				};
 			}
 			case "sheriff_vote": {
@@ -929,7 +959,7 @@ export class GameEngine {
 					legalTargets: this.aliveSeats().filter((seat) => seat !== task.seat),
 					isSheriff: true,
 					promptHint:
-						"你是警长且已出局。请调用 transfer_badge 把警徽交给一名存活玩家，或传 target: null 销毁警徽。优先交给可信的好人；交给狼人会让对方获得 1.5 票和警徽。没有可信目标时宁可销毁。",
+						"你是警长且已出局。调用 transfer_badge 把警徽交给一名存活玩家，或传 target: null 销毁警徽。判断这 1.5 票是否有利于你的阵营；无人能帮到本方时可以销毁。",
 				};
 			}
 			case "last_words": {
@@ -1000,6 +1030,28 @@ export class GameEngine {
 	private applyAction(turn: TurnRequest, action: Action): void {
 		const player = this.player(action.seat);
 		switch (action.kind) {
+			case "wolf_strategy": {
+				if (!player.alive || player.role !== "werewolf") {
+					throw new RuleError("not_wolf", "只有存活的狼人可以制定狼队战术");
+				}
+				const plan = action.plan.trim();
+				if (plan.length === 0 || plan.length > MAX_WOLF_PLAN_CHARS) {
+					throw new RuleError(
+						"bad_wolf_plan",
+						`狼队战术计划长度必须在 1-${MAX_WOLF_PLAN_CHARS} 字之间`,
+					);
+				}
+				this.state.phase = "night_wolves";
+				this.state.wolfPlan = plan;
+				this.state.wolfPlanDay = this.state.day;
+				this.state.wolfPlanAuthor = action.seat;
+				this.emit("wolf_plan", { kind: "wolves" }, {
+					actor: action.seat,
+					text: `狼队战术计划（第 ${this.state.day} 夜，${seatLabel(action.seat)}制定）：${plan}`,
+					data: { plan, day: this.state.day, author: action.seat },
+				});
+				return;
+			}
 			case "wolf_turn": {
 				if (!player.alive || player.role !== "werewolf") {
 					throw new RuleError("not_wolf", "只有存活的狼人可以行动");
@@ -1406,6 +1458,7 @@ export function makePlayerView(
 		"agent_error",
 		"default_action",
 		"turn_start",
+		"wolf_plan",
 	]);
 	const ownEcho = new Set<EventType>([
 		"speech",
@@ -1447,6 +1500,12 @@ export function makePlayerView(
 		sheriff: state.sheriff,
 		sheriffCandidates: [...state.sheriffCandidates],
 		sheriffVoteWeight,
+		wolfPlan: player.role === "werewolf" ? state.wolfPlan : null,
+		wolfPlanDay: player.role === "werewolf" ? state.wolfPlanDay : null,
+		wolfPlanAuthor: player.role === "werewolf" ? state.wolfPlanAuthor : null,
+		knownWolfSeats: player.role === "werewolf"
+			? state.players.filter((p) => p.role === "werewolf").map((p) => p.seat)
+			: undefined,
 		legalTargets: turn.legalTargets,
 		privateInfo,
 		newEvents,

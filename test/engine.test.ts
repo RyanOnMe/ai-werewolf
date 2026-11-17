@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { GameEngine } from "../src/engine/engine.ts";
+import { GameEngine, makePlayerView } from "../src/engine/engine.ts";
 import {
 	type Action,
 	type Role,
@@ -62,9 +62,92 @@ test("开局身份数量正确，身份分配不进入公共视野", () => {
 	assert.equal(seat4Events.some((e) => e.type === "game_start"), true);
 
 	const first = engine.advance();
-	assert.equal(first.turn?.kind, "wolf_turn");
+	assert.equal(first.turn?.kind, "wolf_strategy");
 	assert.equal(first.turn?.seat, 1);
-	assert.deepEqual(first.turn?.legalTargets, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+	assert.deepEqual(first.turn?.legalTargets, []);
+	engine.submit({
+		kind: "wolf_strategy",
+		seat: 1,
+		plan: "首夜计划：优先刀关键好人，白天分散站边。",
+	});
+	const next = engine.advance();
+	assert.equal(next.turn?.kind, "wolf_turn");
+	assert.equal(next.turn?.seat, 1);
+	assert.deepEqual(next.turn?.legalTargets, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+});
+
+test("狼队战术：首夜制定计划，只对狼队可见，下一夜可更新", () => {
+	const engine = makeEngine("wolf-plan");
+	const first = engine.advance();
+	assert.equal(first.turn?.kind, "wolf_strategy");
+	assert.equal(first.turn?.seat, 1);
+	assert.deepEqual(first.turn?.wolfTeammates, [2, 3]);
+	assert.equal(first.turn?.previousWolfPlan, null);
+	assert.throws(
+		() => engine.submit({ kind: "wolf_strategy", seat: 1, plan: "   " }),
+		(error: unknown) => error instanceof RuleError && error.code === "bad_wolf_plan",
+	);
+
+	const plan = "首夜：刀4号；1号悍跳预言家，2号倒钩，3号跟票。";
+	engine.submit({ kind: "wolf_strategy", seat: 1, plan });
+	assert.equal(engine.state.wolfPlan, plan);
+	assert.equal(engine.state.wolfPlanDay, 1);
+	assert.equal(engine.state.wolfPlanAuthor, 1);
+
+	const planEvent = engine.allEvents.find((event) => event.type === "wolf_plan");
+	assert.ok(planEvent);
+	assert.equal(planEvent.visibility.kind, "wolves");
+	assert.equal(engine.visibleEventsFor(1).includes(planEvent), true);
+	assert.equal(engine.visibleEventsFor(2).includes(planEvent), true);
+	assert.equal(engine.visibleEventsFor(4).includes(planEvent), false);
+
+	const wolfTurn = engine.advance();
+	assert.equal(wolfTurn.turn?.kind, "wolf_turn");
+	const wolfView = makePlayerView(engine.state, engine.allEvents, wolfTurn.turn!, 1, 0);
+	assert.equal(wolfView.wolfPlan, plan);
+	const goodView = makePlayerView(engine.state, engine.allEvents, wolfTurn.turn!, 4, 0);
+	assert.equal(goodView.wolfPlan, null);
+
+	const act = (turn: TurnRequest): Action => {
+		switch (turn.kind) {
+			case "wolf_turn":
+				return { kind: "wolf_turn", seat: turn.seat, speech: "", vote: "no_kill" };
+			case "seer_check":
+				return { kind: "seer_check", seat: turn.seat, target: 4 };
+			case "witch_act":
+				return { kind: "witch_act", seat: turn.seat, save: false, poisonTarget: null };
+			case "last_words":
+				return { kind: "last_words", seat: turn.seat, text: "再见。" };
+			case "hunter_shoot":
+				return { kind: "hunter_shoot", seat: turn.seat, target: null };
+			case "day_speech":
+				return { kind: "day_speech", seat: turn.seat, text: "先听一圈。" };
+			case "day_vote":
+				return { kind: "day_vote", seat: turn.seat, target: "abstain" };
+			case "wolf_strategy":
+				return { kind: "wolf_strategy", seat: turn.seat, plan: "更新计划。" };
+			case "sheriff_signup":
+				return { kind: "sheriff_signup", seat: turn.seat, run: false };
+			case "sheriff_speech":
+				return { kind: "sheriff_speech", seat: turn.seat, text: "不上警。" };
+			case "sheriff_vote":
+				return { kind: "sheriff_vote", seat: turn.seat, target: "abstain" };
+			case "badge_transfer":
+				return { kind: "badge_transfer", seat: turn.seat, target: null };
+		}
+	};
+
+	let advanced = wolfTurn;
+	while (advanced.turn) {
+		if (advanced.turn.kind === "wolf_strategy" && advanced.turn.day === 2) break;
+		engine.submit(act(advanced.turn));
+		advanced = engine.advance();
+	}
+	assert.equal(advanced.turn?.kind, "wolf_strategy");
+	assert.equal(advanced.turn?.day, 2);
+	assert.equal(advanced.turn?.previousWolfPlan, plan);
+	assert.equal(advanced.turn?.previousWolfPlanDay, 1);
+	assert.equal(advanced.turn?.previousWolfPlanAuthor, 1);
 });
 
 test("女巫用解药救下狼刀目标：平安夜，解药消耗", () => {
@@ -74,6 +157,8 @@ test("女巫用解药救下狼刀目标：平安夜，解药消耗", () => {
 		(t) => t.kind === "day_speech",
 		(t) => {
 			switch (t.kind) {
+				case "wolf_strategy":
+					return { kind: "wolf_strategy", seat: t.seat, plan: "首夜计划：优先刀关键好人，白天分散站边。" };
 				case "wolf_turn":
 					return { kind: "wolf_turn", seat: t.seat, speech: "刀4号", vote: 4 };
 				case "seer_check":
@@ -106,6 +191,8 @@ test("狼刀 + 女巫毒：两人死亡，公开播报不泄漏死因", () => {
 		(t) => t.kind === "day_speech",
 		(t) => {
 			switch (t.kind) {
+				case "wolf_strategy":
+					return { kind: "wolf_strategy", seat: t.seat, plan: "首夜计划：优先刀关键好人，白天分散站边。" };
 				case "wolf_turn":
 					return { kind: "wolf_turn", seat: t.seat, speech: "", vote: 4 };
 				case "seer_check":
@@ -142,6 +229,8 @@ test("猎人被狼刀可以开枪，被毒杀不能开枪", () => {
 		(t) => {
 			seen.push(t.kind);
 			switch (t.kind) {
+				case "wolf_strategy":
+					return { kind: "wolf_strategy", seat: t.seat, plan: "首夜计划：优先刀关键好人，白天分散站边。" };
 				case "wolf_turn":
 					return { kind: "wolf_turn", seat: t.seat, speech: "", vote: 9 };
 				case "seer_check":
@@ -174,6 +263,8 @@ test("猎人被狼刀可以开枪，被毒杀不能开枪", () => {
 		(t) => {
 			seen2.push(t.kind);
 			switch (t.kind) {
+				case "wolf_strategy":
+					return { kind: "wolf_strategy", seat: t.seat, plan: "首夜计划：优先刀关键好人，白天分散站边。" };
 				case "wolf_turn":
 					return { kind: "wolf_turn", seat: t.seat, speech: "", vote: "no_kill" };
 				case "seer_check":
@@ -209,6 +300,8 @@ test("投票平票时无人被放逐", () => {
 		(t, e) => t.kind === "wolf_turn" && e.state.day === 2,
 		(t) => {
 			switch (t.kind) {
+				case "wolf_strategy":
+					return { kind: "wolf_strategy", seat: t.seat, plan: "首夜计划：优先刀关键好人，白天分散站边。" };
 				case "wolf_turn":
 					return { kind: "wolf_turn", seat: t.seat, speech: "", vote: "no_kill" };
 				case "seer_check":
@@ -234,6 +327,13 @@ test("投票平票时无人被放逐", () => {
 test("规则校验：女巫不能同晚双药，预言家不能验自己", () => {
 	const engine = makeEngine("invalid-actions");
 	let advanced = engine.advance();
+	assert.equal(advanced.turn?.kind, "wolf_strategy");
+	engine.submit({
+		kind: "wolf_strategy",
+		seat: advanced.turn!.seat,
+		plan: "测试计划：优先刀关键好人。",
+	});
+	advanced = engine.advance();
 	assert.equal(advanced.turn?.kind, "wolf_turn");
 	for (let seat = 1; seat <= 3; seat++) {
 		const turn: TurnRequest | null = advanced.turn;

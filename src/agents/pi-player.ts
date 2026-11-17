@@ -3,17 +3,21 @@ import {
 	type AgentEvent,
 	type StreamFn,
 } from "@earendil-works/pi-agent-core";
-import type { Model, ThinkingLevel } from "@earendil-works/pi-ai";
+import type { AssistantMessage, AssistantMessageEvent, Model, ThinkingLevel } from "@earendil-works/pi-ai";
 import {
 	type Action,
 	type GameMode,
 	type PlayerPolicy,
+	type PlayerProgress,
 	type PlayerView,
 	type Role,
 	type TurnRequest,
+	MAX_WOLF_PLAN_CHARS,
+	isPublicSpeechTurn,
 	seatLabel,
 } from "../engine/types.ts";
-import { buildCorrectionPrompt, buildSystemPrompt } from "./rules.ts";
+import { isFatalModelError, withModelRetry, type RetryOptions } from "./model-stream.ts";
+import { buildCorrectionPrompt, buildSystemPrompt, expectedTool } from "./rules.ts";
 import {
 	buildTurnTools,
 	createTurnHandle,
@@ -46,6 +50,8 @@ export interface PiPlayerOptions {
 	limits?: Partial<ToolLimits>;
 	/** 每个 prompt 内最多允许几个 agent turn（防止工具循环）。 */
 	maxTurnsPerPrompt?: number;
+	retry?: Partial<RetryOptions>;
+	/** 进程内调试事件，含私密上下文，不能直接转发给观众。 */
 	onEvent?: (seat: number, event: AgentEvent) => void;
 }
 
@@ -66,6 +72,7 @@ export class PiPlayer implements PlayerPolicy {
 	private readonly maxTurnsPerPrompt: number;
 	private readonly onEvent?: (seat: number, event: AgentEvent) => void;
 	private handle: TurnHandle | null = null;
+	private onProgress?: (progress: PlayerProgress) => void;
 	private turnsThisPrompt = 0;
 	private lastAssistantError: string | null = null;
 	private abortPromise: Promise<void> | null = null;
@@ -76,11 +83,44 @@ export class PiPlayer implements PlayerPolicy {
 		this.seat = options.seat;
 		this.role = options.role;
 		this.limits = { ...DEFAULT_LIMITS, ...options.limits };
-		this.maxTurnsPerPrompt = options.maxTurnsPerPrompt ?? 8;
+		this.maxTurnsPerPrompt = options.maxTurnsPerPrompt ?? 10;
 		this.onEvent = options.onEvent;
 		const maxTokens = options.maxTokens ?? 2000;
-		const streamFn: StreamFn = (model, context, streamOptions) =>
-			options.baseStreamFn(model, context, { ...streamOptions, maxTokens });
+		const streamFn: StreamFn = (model, context, streamOptions) => {
+			const handle = this.handle;
+			const turn = handle?.turn;
+			const report = (progress: PlayerProgress): void => {
+				if (this.handle === handle && !streamOptions?.signal?.aborted) this.onProgress?.(progress);
+			};
+			const previewTool = turn && isPublicSpeechTurn(turn.kind) ? expectedTool(turn.kind)
+				: turn?.kind === "wolf_turn" ? "wolf_speak"
+				: turn?.kind === "wolf_strategy" ? "set_wolf_plan" : null;
+			const field = previewTool === "set_wolf_plan" ? "plan" : "text";
+			const maxChars = field === "plan" ? MAX_WOLF_PLAN_CHARS
+				: turn?.kind === "last_words" ? this.limits.maxLastWordsChars : this.limits.maxSpeechChars;
+			let draftIndex: number | undefined;
+			let previous = "";
+			report({ state: "waiting" });
+			return withModelRetry(options.baseStreamFn, options.retry, {
+				onAttempt: () => report({ state: "waiting" }),
+				onChunk: (event) => {
+					if (!previewTool || !this.onProgress) return;
+					const draft = speechDraft(event, previewTool, field);
+					if (!draft || (draftIndex !== undefined && draftIndex !== draft.index)) return;
+					const text = draft.text.slice(0, maxChars).replace(/[\uD800-\uDBFF]$/, "");
+					if (!text.trim() || text === previous) return;
+					draftIndex = draft.index;
+					previous = text;
+					report({ state: "streaming", text });
+				},
+				onRetry: (retry, usage) => {
+					draftIndex = undefined;
+					previous = "";
+					this.addUsage(usage);
+					report({ state: "retrying", retry });
+				},
+			})(model, context, { ...streamOptions, maxTokens });
+		};
 		this.agent = new Agent({
 			initialState: {
 				systemPrompt: buildSystemPrompt(options.role, options.seat, options.mode ?? "9p"),
@@ -106,41 +146,47 @@ export class PiPlayer implements PlayerPolicy {
 		this.agent.subscribe((event) => this.handleEvent(event));
 	}
 
-	async decide(turn: TurnRequest, view: PlayerView): Promise<Action> {
+	async decide(turn: TurnRequest, view: PlayerView, onProgress?: (progress: PlayerProgress) => void): Promise<Action> {
 		if (this.disposed) throw new PiPlayerError("PiPlayer 已释放", true);
 		if (this.abortPromise) await this.abortPromise;
 		const handle = createTurnHandle(turn, view);
 		this.handle = handle;
+		this.onProgress = onProgress;
 		this.turnsThisPrompt = 0;
 		this.lastAssistantError = null;
 		this.agent.state.tools = buildTurnTools(handle, this.limits);
 
 		try {
-			await this.agent.prompt(view.brief);
-			if (!handle.action && !this.lastAssistantError) {
-				this.turnsThisPrompt = 0;
-				await this.agent.prompt(buildCorrectionPrompt(turn.kind));
+			try {
+				await this.agent.prompt(view.brief);
+				if (!handle.action && !this.lastAssistantError) {
+					this.turnsThisPrompt = 0;
+					await this.agent.prompt(buildCorrectionPrompt(turn.kind));
+				}
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				throw new PiPlayerError(
+					`${seatLabel(this.seat)} 的 agent 调用失败：${message}`,
+					isFatalModelError(message),
+					error,
+				);
 			}
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			throw new PiPlayerError(
-				`${seatLabel(this.seat)} 的 agent 调用失败：${message}`,
-				isFatalModelError(message),
-				error,
-			);
-		}
 
-		if (!handle.action) {
-			const message =
-				this.lastAssistantError ??
-				this.agent.state.errorMessage ??
-				"agent 没有提交本回合行动";
-			throw new PiPlayerError(
-				`${seatLabel(this.seat)} 未提交行动：${message}`,
-				isFatalModelError(message),
-			);
+			if (!handle.action) {
+				const message =
+					this.lastAssistantError ??
+					this.agent.state.errorMessage ??
+					"agent 没有提交本回合行动";
+				throw new PiPlayerError(
+					`${seatLabel(this.seat)} 未提交行动：${message}`,
+					isFatalModelError(message),
+				);
+			}
+			return handle.action;
+		} finally {
+			this.handle = null;
+			this.onProgress = undefined;
 		}
-		return handle.action;
 	}
 
 	abort(): void {
@@ -193,23 +239,27 @@ export class PiPlayer implements PlayerPolicy {
 
 	private handleEvent(event: AgentEvent): void {
 		if (event.type === "message_end" && event.message.role === "assistant") {
-			const usage = event.message.usage;
-			if (usage) {
-				this.totals.input += usage.input;
-				this.totals.output += usage.output;
-				this.totals.total += usage.totalTokens;
-			}
+			this.addUsage(event.message.usage);
 			if (event.message.stopReason === "error" || event.message.stopReason === "aborted") {
 				this.lastAssistantError = event.message.errorMessage ?? event.message.stopReason;
 			}
 		}
 		this.onEvent?.(this.seat, event);
 	}
+
+	private addUsage(usage: AssistantMessage["usage"] | undefined): void {
+		if (!usage) return;
+		this.totals.input += usage.input;
+		this.totals.output += usage.output;
+		this.totals.total += usage.totalTokens;
+	}
 }
 
-export function isFatalModelError(message: string | null | undefined): boolean {
-	if (!message) return false;
-	return /not supported|unauthorized|forbidden|invalid api key|authentication|missing.*key|401|403|quota|insufficient|model.*not found/i.test(
-		message,
-	);
+function speechDraft(event: AssistantMessageEvent, tool: string, field: string): { index: number; text: string } | null {
+	if (event.type !== "toolcall_delta" && event.type !== "toolcall_end") return null;
+	const block = event.type === "toolcall_end" ? event.toolCall : event.partial.content[event.contentIndex];
+	if (block?.type !== "toolCall" || block.name !== tool) return null;
+	const args = block.arguments;
+	if (typeof args?.[field] !== "string" || Object.keys(args).length !== 1) return null;
+	return { index: event.contentIndex, text: args[field] };
 }

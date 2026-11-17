@@ -3,3 +3,6 @@ runs/
 .pi/
 *.log
 .DS_Store
+.env
+.env.*
+!.env.example

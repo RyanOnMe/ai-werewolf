@@ -4,19 +4,21 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { AgentEvent } from "@earendil-works/pi-agent-core";
 import {
 	type PlayerView,
+	type PlayerProgress,
 	type Role,
 	type TurnKind,
 	type TurnRequest,
 	type Action,
 } from "../src/engine/types.ts";
 import { PiPlayer, PiPlayerError } from "../src/agents/pi-player.ts";
-import { FAKE_MODEL, fakeStream, errorStream, type FakePlanner } from "./fake-llm.ts";
+import { FAKE_MODEL, fakeStream, errorStream, streamedTool, type FakePlanner } from "./fake-llm.ts";
 
 function makeTurn(
 	kind: TurnKind,
 	overrides: Partial<TurnRequest> = {},
 ): TurnRequest {
 	const phaseByKind: Record<TurnKind, TurnRequest["phase"]> = {
+		wolf_strategy: "night_wolves",
 		wolf_turn: "night_wolves",
 		seer_check: "night_seer",
 		witch_act: "night_witch",
@@ -30,6 +32,7 @@ function makeTurn(
 		day_vote: "day_vote",
 	};
 	const hints: Record<TurnKind, string> = {
+		wolf_strategy: "请调用 set_wolf_plan。",
 		wolf_turn: "先 wolf_speak，再 wolf_vote。",
 		seer_check: "请调用 seer_check。",
 		witch_act: "请调用 witch_act。",
@@ -78,6 +81,9 @@ function makeView(turn: TurnRequest, role: Role): PlayerView {
 		sheriff: null,
 		sheriffCandidates: [],
 		sheriffVoteWeight: 1.5,
+		wolfPlan: null,
+		wolfPlanDay: null,
+		wolfPlanAuthor: null,
 		legalTargets: turn.legalTargets,
 		privateInfo: [`你的身份：${role}`, `状态：${alive ? "存活" : "已出局"}`],
 		newEvents: [],
@@ -160,6 +166,42 @@ test("先调用 view_state 再行动，agent loop 会继续", async () => {
 	) as { content: { type: string; text?: string }[] }[];
 	assert.equal(toolResults.length, 2);
 	assert.equal(toolResults[0]?.content[0]?.text?.includes("私密信息"), true);
+});
+
+test("流断开后只重试失败的模型请求，不执行草稿里的工具或重跑已完成的工具", async () => {
+	const turn = makeTurn("day_speech");
+	const progress: PlayerProgress[] = [];
+	const executed: string[] = [];
+	const seeState = fakeStream(() => ({ name: "view_state", args: {} }));
+	let calls = 0;
+	const player = new PiPlayer({
+		seat: 1, role: "villager", model: FAKE_MODEL, sessionId: "retry-test",
+		retry: { maxRetries: 2, baseDelayMs: 1 },
+		baseStreamFn: (model, context, options) => {
+			calls++;
+			if (calls === 1) return seeState(model, context, options);
+			assert.equal(context.messages.at(-1)?.role, "toolResult");
+			assert.ok(!JSON.stringify(context.messages).includes("失败草稿"));
+			if (calls === 2) return streamedTool("say", "text", ["失败草稿"], { error: "503 Service Unavailable" });
+			return streamedTool("say", "text", ["2号的票不对，", "我想先听他的解释。"], { privateText: "私密推理" });
+		},
+		onEvent: (_seat, event) => {
+			if (event.type === "tool_execution_start") executed.push(event.toolName);
+		},
+	});
+	try {
+		assert.deepEqual(await player.decide(turn, makeView(turn, "villager"), (item) => progress.push(item)),
+			{ kind: "day_speech", seat: 1, text: "2号的票不对，我想先听他的解释。" });
+		assert.equal(calls, 3);
+		assert.deepEqual(executed, ["view_state", "say"]);
+		assert.deepEqual(progress.filter((p) => p.state === "streaming").map((p) => p.text),
+			["失败草稿", "2号的票不对，", "2号的票不对，我想先听他的解释。"]);
+		assert.equal(progress.filter((p) => p.state === "retrying").length, 1);
+		assert.ok(!JSON.stringify(player.transcript()).includes("失败草稿"));
+		assert.equal(player.usage().total, 45);
+	} finally {
+		await player.dispose();
+	}
 });
 
 test("非法投票目标被工具拒绝后，模型可以重试", async () => {
@@ -251,6 +293,26 @@ test("狼人先 wolf_speak 再 wolf_vote，发言自动合并", async () => {
 	assert.equal(result.toolSets[0]?.includes("say"), false);
 });
 
+test("狼队战术：set_wolf_plan 提交计划且不暴露刀人工具", async () => {
+	const result = await runTurn(
+		"wolf_strategy",
+		"werewolf",
+		() => ({
+			name: "set_wolf_plan",
+			args: { plan: "首夜刀4号；1号悍跳预言家，2号倒钩，3号跟票。" },
+		}),
+		{ wolfTeammates: [2, 3], previousWolfPlan: null },
+	);
+	assert.deepEqual(result.action, {
+		kind: "wolf_strategy",
+		seat: 1,
+		plan: "首夜刀4号；1号悍跳预言家，2号倒钩，3号跟票。",
+	});
+	assert.equal(result.toolSets[0]?.includes("set_wolf_plan"), true);
+	assert.equal(result.toolSets[0]?.includes("wolf_vote"), false);
+	assert.equal(result.toolSets[0]?.includes("say"), false);
+});
+
 test("同一回合重复行动会被 beforeToolCall 阻止", async () => {
 	const result = await runTurn("day_speech", "villager", () => ({
 		calls: [
@@ -279,6 +341,15 @@ test("不同回合只暴露合法工具，并组装对应 Action", async () => {
 		mustHave: string[];
 		mustNotHave: string[];
 	}[] = [
+		{
+			kind: "wolf_strategy",
+			role: "werewolf",
+			planner: () => ({ name: "set_wolf_plan", args: { plan: "首夜计划：刀关键好人。" } }),
+			overrides: { wolfTeammates: [2, 3] },
+			expected: { kind: "wolf_strategy", seat: 1, plan: "首夜计划：刀关键好人。" },
+			mustHave: ["set_wolf_plan", "view_state"],
+			mustNotHave: ["wolf_vote", "say", "vote"],
+		},
 		{
 			kind: "seer_check",
 			role: "seer",
@@ -335,11 +406,14 @@ test("不同回合只暴露合法工具，并组装对应 Action", async () => {
 
 test("模型错误会标记为 fatal，交由 runner 终止或降级", async () => {
 	const turn = makeTurn("day_speech");
+	let attempts = 0;
+	const failure = errorStream("model not supported for this account");
 	const player = new PiPlayer({
 		seat: 1,
 		role: "villager",
 		model: FAKE_MODEL,
-		baseStreamFn: errorStream("model not supported for this account"),
+		retry: { baseDelayMs: 1 },
+		baseStreamFn: (...args) => { attempts++; return failure(...args); },
 		sessionId: "fatal-test",
 	});
 	try {
@@ -350,6 +424,7 @@ test("模型错误会标记为 fatal，交由 runner 终止或降级", async () 
 				error.fatal &&
 				error.message.includes("not supported"),
 		);
+		assert.equal(attempts, 1);
 	} finally {
 		await player.dispose();
 	}

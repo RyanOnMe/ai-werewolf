@@ -22,6 +22,12 @@ export class RandomPolicy implements PlayerPolicy {
 	async decide(turn: TurnRequest, view: PlayerView): Promise<Action> {
 		const others = view.aliveSeats.filter((seat) => seat !== view.seat);
 		switch (turn.kind) {
+			case "wolf_strategy":
+				return {
+					kind: "wolf_strategy",
+					seat: this.seat,
+					plan: "随机策略：优先刀高影响力玩家；白天分散站边、避免抱团；根据死亡和票型调整。",
+				};
 			case "wolf_turn": {
 				const vote =
 					others.length === 0 || this.rng.next() < 0.1

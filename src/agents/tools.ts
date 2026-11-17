@@ -4,6 +4,7 @@ import {
 	type Action,
 	type PlayerView,
 	type TurnRequest,
+	MAX_WOLF_PLAN_CHARS,
 	PHASE_LABEL,
 	ROLE_LABEL,
 	factionOf,
@@ -29,6 +30,15 @@ export function createTurnHandle(turn: TurnRequest, view: PlayerView): TurnHandl
 }
 
 export const INFO_TOOL_NAMES = new Set(["view_state", "view_log", "view_rules", "view_strategy"]);
+
+function involvesSeat(event: PlayerView["visibleEvents"][number], seat: number): boolean {
+	if (event.actor === seat || event.target === seat) return true;
+	const data = event.data ?? {};
+	if (data.seat === seat) return true;
+	if (Array.isArray(data.seats) && data.seats.includes(seat)) return true;
+	const votes = data.votes;
+	return Boolean(votes && typeof votes === "object" && (Object.hasOwn(votes, seat) || Object.values(votes).includes(seat)));
+}
 
 interface ToolOutcome {
 	text: string;
@@ -84,6 +94,33 @@ export function buildTurnTools(handle: TurnHandle, limits: ToolLimits): AgentToo
 	const turn = handle.turn;
 
 	switch (turn.kind) {
+		case "wolf_strategy": {
+			tools.push(
+				makeTool(
+					handle,
+					"set_wolf_plan",
+					"提交狼队战术计划",
+					"提交/更新本夜狼队战术计划，只有狼队可见。写清刀口、屠边方向、白天谁悍跳/倒钩/冲票、如何应对预言家/女巫/警长，以及计划失效时怎么调整。计划是团队基线，不强制后续行动。",
+					Type.Object({
+						plan: Type.String({
+							minLength: 1,
+							maxLength: MAX_WOLF_PLAN_CHARS,
+							description: "战术计划，中文；建议分点写刀口、屠边、白天剧本和分支预案。",
+						}),
+					}),
+					(params) => {
+						const problem = checkText(params.plan, MAX_WOLF_PLAN_CHARS);
+						if (problem) return reject(problem);
+						return accept(
+							handle,
+							{ kind: "wolf_strategy", seat: turn.seat, plan: params.plan },
+							"已提交狼队战术计划。接下来所有狼人都会看到它。",
+						);
+					},
+				),
+			);
+			break;
+		}
 		case "wolf_turn": {
 			tools.push(
 				makeTool(
@@ -286,7 +323,7 @@ export function buildTurnTools(handle: TurnHandle, limits: ToolLimits): AgentToo
 					handle,
 					"sheriff_say",
 					"警长竞选发言",
-					"发表警长竞选发言，所有玩家都会看到。说明上警目的、身份/站边、警徽流和归票计划；不要只说“我上警”。",
+					"发表公开竞选发言，说明上警目的和拿徽后的验人、站边或归票安排。",
 					Type.Object({
 						text: Type.String({
 							minLength: 1,
@@ -341,7 +378,7 @@ export function buildTurnTools(handle: TurnHandle, limits: ToolLimits): AgentToo
 					handle,
 					"transfer_badge",
 					"移交警徽",
-					"你已出局且是警长。把警徽交给一名存活玩家，或传 target=null 销毁警徽。优先交给可信的好人；交给狼人会让对方获得 1.5 票和警徽。",
+					"你已出局且是警长。把警徽交给有利于你方阵营的存活玩家，或传 target=null 销毁警徽。翻牌白痴拿徽也没有放逐票权。",
 					Type.Object({
 						target: Type.Union([Type.Integer({ minimum: 1 }), Type.Null()], {
 							description: "接警徽的存活玩家座位号，或 null 销毁。",
@@ -433,15 +470,20 @@ export function buildTurnTools(handle: TurnHandle, limits: ToolLimits): AgentToo
 			handle,
 			"view_log",
 			"查看历史事件",
-			"查看你有权看到的最近历史事件（公开发言、投票、死亡、狼队频道、法官私信等）。不消耗行动。",
+			"查询你有权看到的历史事件，可按座位或天数筛选，适合核对某位玩家的发言和实际投票。不消耗行动。",
 			Type.Object({
 				lastN: Type.Optional(
 					Type.Integer({ minimum: 1, maximum: 80, description: "查看最近多少条，默认 30。" }),
 				),
+				seat: Type.Optional(Type.Integer({ minimum: 1, maximum: handle.view.playerCount, description: "只看与此座位有关的事件。" })),
+				day: Type.Optional(Type.Integer({ minimum: 1, maximum: handle.view.day, description: "只看这一天及当夜。" })),
 			}),
 			(params) => {
 				const n = params.lastN ?? 30;
-				const events = handle.view.visibleEvents.slice(-n);
+				const events = handle.view.visibleEvents.filter((event) =>
+					(params.day === undefined || event.day === params.day) &&
+					(params.seat === undefined || involvesSeat(event, params.seat)),
+				).slice(-n);
 				return {
 					text:
 						events.length === 0
@@ -486,6 +528,13 @@ function renderState(handle: TurnHandle): string {
 		lines.push(`存活：${formatSeatList(view.aliveSeats)}；出局：${formatSeatList(view.deadSeats)}`);
 	lines.push("私密信息：");
 	for (const line of view.privateInfo) lines.push(`- ${line}`);
+	if (view.role === "werewolf") {
+		lines.push(
+			view.wolfPlan
+				? `狼队战术计划（第 ${view.wolfPlanDay} 夜，${seatLabel(view.wolfPlanAuthor ?? view.seat)}）：${view.wolfPlan}`
+				: "狼队战术计划：尚未制定。",
+		);
+	}
 	lines.push(`本回合要求：${view.turn.promptHint}`);
 	if (view.turn.legalTargets.length > 0) {
 		lines.push(`可行动目标：${formatSeatList(view.turn.legalTargets)}`);

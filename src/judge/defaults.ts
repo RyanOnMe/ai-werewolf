@@ -4,6 +4,12 @@ import { type Action, type PlayerView, RuleError } from "../engine/types.ts";
 export function defaultActionFor(view: PlayerView): Action {
 	const { turn } = view;
 	switch (turn.kind) {
+		case "wolf_strategy":
+			return {
+				kind: "wolf_strategy",
+				seat: turn.seat,
+				plan: "本夜按屠边收益刀人；白天保持一狼悍跳、一狼倒钩、其余狼分散跟票；根据死亡和票型随时调整，不强行执行旧计划。",
+			};
 		case "wolf_turn":
 			return { kind: "wolf_turn", seat: turn.seat, speech: "", vote: "no_kill" };
 		case "seer_check": {
